@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
-import { RunnerEvent } from "./types.js";
+import type { RunnerEvent } from "./types.js";
 
 describe("Codex runner protocol", () => {
   it("builds a new-session invocation", () => {
