@@ -194,4 +194,31 @@ describe("Agent run integration failures", () => {
       lastError: null,
     });
   });
+  it("cancels a run before invoking the model", async () => {
+    let runnerCalled = false;
+
+    const service = await makeService({
+      run: async () => {
+        runnerCalled = true;
+        return {
+          output: "unexpected",
+          threadId: "unexpected",
+          usage: null,
+        };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+
+    const agent = await service.createAgent({ name: "Early cancellation test" });
+    const { run } = await service.sendMessage(agent.id, "cancel immediately");
+    const stopped = await service.stopAgent(agent.id);
+
+    expect(runnerCalled).toBe(false);
+    expect(service.getRun(run.id)).toMatchObject({
+      status: "cancelled",
+      error: "Run cancelled",
+    });
+    expect(stopped.status).toBe("stopped");
+  });
 });
