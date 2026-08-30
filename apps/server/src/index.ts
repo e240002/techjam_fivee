@@ -14,7 +14,7 @@ const store = new JsonStore(path.join(config.dataDirectory, "launchpad.json"));
 const traceService = new TraceService(store);
 const workspaces = new WorkspaceManager(config.workspaceRoot);
 const runner = createRunner(config);
-const service = new AgentService(config, store, workspaces, runner);
+const service = new AgentService(config, store, workspaces, runner, traceService);
 await service.initialize();
 
 const app = await createApp(config, service, traceService);

@@ -3,6 +3,7 @@ import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
 import { JsonStore } from "./store.js";
+import { TraceService } from "./tracing/trace-service.js";
 import type {
   Agent,
   AgentRun,
@@ -24,6 +25,7 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
+    private readonly traces: TraceService,
   ) {}
 
   async initialize(): Promise<void> {
@@ -240,21 +242,47 @@ export class AgentService {
         storedRun.startedAt = now();
       }
     });
+
+    const trace = await this.traces.startTrace({
+      agentId: agentAtStart.id,
+      runId: run.id,
+    });
+    const orchestrationSpan = await this.traces.startSpan({
+      traceId: trace.id,
+      type: "orchestration",
+      name: "agent.run",
+    });
+    let modelSpanId: string | null = null;
+
     try {
       if (this.cancellationRequests.has(agentAtStart.id)) {
         throw new RunCancelledError();
       }
+
+      const modelSpan = await this.traces.startSpan({
+        traceId: trace.id,
+        parentSpanId: orchestrationSpan.id,
+        type: "model",
+        name: "codex.run",
+      });
+      modelSpanId = modelSpan.id;
+
       const result = await this.runner.run({
         agentId: agentAtStart.id,
         workspacePath: agentAtStart.workspacePath,
         prompt: run.prompt,
         threadId: agentAtStart.codexThreadId,
       });
+
+      await this.traces.endSpan(modelSpan.id, { status: "completed" });
+      modelSpanId = null;
       const completedAt = now();
+
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
         if (!storedRun || !agent) return;
+
         storedRun.status = "completed";
         storedRun.output = result.output;
         storedRun.usage = result.usage;
@@ -272,10 +300,23 @@ export class AgentService {
         agent.lastError = null;
         agent.updatedAt = completedAt;
       });
+
+      await this.traces.endSpan(orchestrationSpan.id, { status: "completed" });
+      await this.traces.endTrace(trace.id, "completed");
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
       const message = error instanceof Error ? error.message : String(error);
+      const traceStatus = cancelled ? "cancelled" : "failed";
+      const traceError = cancelled ? "Run cancelled" : "Execution failed";
+
+      if (modelSpanId) {
+        await this.traces.endSpan(modelSpanId, {
+          status: traceStatus,
+          error: traceError,
+        });
+      }
+
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
@@ -292,30 +333,50 @@ export class AgentService {
           agent.updatedAt = completedAt;
         }
       });
+
+      await this.traces.endSpan(orchestrationSpan.id, {
+        status: traceStatus,
+        error: traceError,
+      });
+      await this.traces.endTrace(trace.id, traceStatus);
     }
   }
 
   private async setStatus(id: string, status: Agent["status"]): Promise<Agent> {
     return this.store.mutate((database) => {
       const agent = database.agents.find((item) => item.id === id);
+
       if (!agent) {
         throw new HttpError(404, "Agent not found");
       }
+
       if (status === "ready" && agent.status === "busy") {
-        throw new HttpError(409, "Stop the active run before starting this Agent");
+        throw new HttpError(
+          409,
+          "Stop the active run before starting this Agent",
+        );
       }
+
       agent.status = status;
-      if (status === "ready") agent.lastError = null;
+
+      if (status === "ready") {
+        agent.lastError = null;
+      }
+
       agent.updatedAt = now();
+
       return structuredClone(agent);
     });
   }
 
   private async cancelExecution(agentId: string): Promise<void> {
     this.cancellationRequests.add(agentId);
+
     try {
       await this.runner.cancel(agentId);
+
       const execution = this.activeExecutions.get(agentId);
+
       if (execution) {
         await execution;
       }
