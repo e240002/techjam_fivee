@@ -1,5 +1,11 @@
 export const REDACTED = "[REDACTED]";
 
+const SAFE_TELEMETRY_KEYS = new Set([
+  "input_tokens",
+  "cached_input_tokens",
+  "output_tokens",
+]);
+
 const SENSITIVE_KEYS = new Set([
   "ark_api_key",
   "api_key",
@@ -8,11 +14,18 @@ const SENSITIVE_KEYS = new Set([
   "authorization",
   "password",
   "passwd",
+  "token",
+  "auth_token",
+  "id_token",
   "access_token",
   "refresh_token",
   "session_token",
   "client_secret",
+  "secret_key",
+  "access_key",
+  "access_key_id",
   "private_key",
+  "credentials",
   "cookie",
   "ak",
   "sk",
@@ -40,18 +53,26 @@ function normalizeKey(key: string): string {
 function isSensitiveKey(key: string): boolean {
   const normalized = normalizeKey(key);
 
+  if (SAFE_TELEMETRY_KEYS.has(normalized)) {
+    return false;
+  }
+
   if (SENSITIVE_KEYS.has(normalized) || RAW_PAYLOAD_KEYS.has(normalized)) {
     return true;
   }
 
   return (
+    normalized === "token" ||
+    normalized.endsWith("_token") ||
     normalized.endsWith("_api_key") ||
     normalized.endsWith("_password") ||
+    normalized.endsWith("_passwd") ||
     normalized.endsWith("_secret") ||
+    normalized.endsWith("_secret_key") ||
+    normalized.endsWith("_access_key") ||
+    normalized.endsWith("_access_key_id") ||
     normalized.endsWith("_private_key") ||
-    normalized.endsWith("_access_token") ||
-    normalized.endsWith("_refresh_token") ||
-    normalized.endsWith("_session_token")
+    normalized.endsWith("_credentials")
   );
 }
 
@@ -66,8 +87,12 @@ export function sanitizeText(text: string): string {
       `Bearer ${REDACTED}`,
     )
     .replace(
-      /\b(ARK_API_KEY|API[_-]?KEY|APP_AUTH_TOKEN|PASSWORD|PASSWD|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|SESSION[_-]?TOKEN|CLIENT[_-]?SECRET|PRIVATE[_-]?KEY|AK|SK)\b\s*[:=]\s*[^\s,;]+/gi,
-      (match) => `${match.split(/[:=]/)[0]}=${REDACTED}`,
+      /["']?(ARK_API_KEY|API[_-]?KEY|APP_AUTH_TOKEN|PASSWORD|PASSWD|AUTH[_-]?TOKEN|ID[_-]?TOKEN|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|SESSION[_-]?TOKEN|CLIENT[_-]?SECRET|SECRET[_-]?KEY|ACCESS[_-]?KEY(?:[_-]?ID)?|PRIVATE[_-]?KEY|AK|SK)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi,
+      (match) => {
+        const separatorIndex = match.search(/[:=]/);
+        const key = match.slice(0, separatorIndex).replace(/["']/g, "");
+        return `${key}=${REDACTED}`;
+      },
     );
 }
 

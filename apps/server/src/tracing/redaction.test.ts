@@ -86,6 +86,34 @@ describe("sanitizeMetadata", () => {
       env: { ARK_API_KEY: REDACTED },
     });
   });
+
+    it("redacts generic token fields", () => {
+    expect(
+      sanitizeMetadata({
+        githubToken: "secret-one",
+        serviceToken: "secret-two",
+        idToken: "secret-three",
+      }),
+    ).toEqual({
+      githubToken: REDACTED,
+      serviceToken: REDACTED,
+      idToken: REDACTED,
+    });
+  });
+
+  it("redacts cloud credential fields", () => {
+    expect(
+      sanitizeMetadata({
+        secretKey: "secret-one",
+        accessKey: "secret-two",
+        accessKeyId: "secret-three",
+      }),
+    ).toEqual({
+      secretKey: REDACTED,
+      accessKey: REDACTED,
+      accessKeyId: REDACTED,
+    });
+  });
 });
 
 describe("sanitizeText", () => {
@@ -118,5 +146,22 @@ describe("sanitizeText", () => {
       sanitizeText("AK=my-access-key SK=my-secret-key"),
     ).toBe("AK=[REDACTED] SK=[REDACTED]");
   });  
+
+  it("redacts credentials inside JSON-like text", () => {
+    const result = sanitizeText(
+      'request failed: {"API_KEY":"my-super-secret"}',
+    );
+
+    expect(result).not.toContain("my-super-secret");
+    expect(result).toContain(REDACTED);
+  });
+
+  it("redacts access tokens inside JSON-like text", () => {
+    const result = sanitizeText(
+      '{"ACCESS_TOKEN":"private-token-value"}',
+    );
+
+    expect(result).not.toContain("private-token-value");
+  });
 }
 );
