@@ -6,10 +6,14 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
+import { sanitizeMetadata, sanitizeText } from "./tracing/redaction.js";
+import type { Trace } from "./tracing/trace-types.js";
 import type { AgentService } from "./agent-service.js";
 
 const agentIdParams = z.object({ id: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
+const traceIdParams = z.object({ traceId: z.string().uuid() });
+const runTraceParams = z.object({ runId: z.string().uuid() });
 const createAgentBody = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(500).optional(),
@@ -23,9 +27,24 @@ const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
 
+export interface TraceQueryService {
+  getTrace(traceId: string): Trace;
+  getTraceByRunId(runId: string): Trace | null;
+}
+function sanitizeTrace(trace: Trace): Trace {
+  return {
+    ...trace,
+    spans: trace.spans.map((span) => ({
+      ...span,
+      error: span.error === null ? null : sanitizeText(span.error),
+      metadata: sanitizeMetadata(span.metadata),
+    })),
+  };
+}
 export async function createApp(
   config: AppConfig,
   service: AgentService,
+  traceService: TraceQueryService,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
@@ -127,7 +146,31 @@ export async function createApp(
     const { id } = runIdParams.parse(request.params);
     return { run: service.getRun(id) };
   });
+    app.get("/api/traces/:traceId", async (request) => {
+    const { traceId } = traceIdParams.parse(request.params);
 
+    try {
+      return { trace: sanitizeTrace(traceService.getTrace(traceId)) };
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === `Trace not found: ${traceId}`
+      ) {
+        throw new HttpError(404, "Trace not found");
+      }
+      throw error;
+    }
+  });
+    app.get("/api/runs/:runId/trace", async (request) => {
+    const { runId } = runTraceParams.parse(request.params);
+    const trace = traceService.getTraceByRunId(runId);
+
+    if (trace === null) {
+      throw new HttpError(404, "Trace not found");
+    }
+
+    return { trace: sanitizeTrace(trace) };
+  });
   if (config.nodeEnv === "production") {
     const webRoot = fileURLToPath(new URL("../../web/dist", import.meta.url));
     await app.register(fastifyStatic, {
