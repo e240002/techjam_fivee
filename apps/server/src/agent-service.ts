@@ -329,6 +329,17 @@ export class AgentService {
 
     // ADDED: Entire trace succeeded
     this.traces.endTrace(trace.id, "completed");
+
+    // Log the trace for debugging purposes (DELETE in production)
+    console.log(
+      "TRACE:",
+      JSON.stringify(
+        this.traces.getTrace(trace.id),
+        null,
+        2,
+      ),
+    );
+
   } catch (error) {
     const completedAt = now();
     const cancelled = error instanceof RunCancelledError;
