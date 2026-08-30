@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
+import { RunCancelledError } from "./errors.js";
 import { JsonStore } from "./store.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
@@ -153,6 +154,44 @@ describe("Agent run integration failures", () => {
     expect(service.getAgent(agent.id)).toMatchObject({
       status: "error",
       lastError: "runner exploded",
+    });
+  });
+  it("cancels a run while the model is active", async () => {
+    let rejectRun!: (error: Error) => void;
+    let signalStarted!: () => void;
+
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const pending = new Promise<RunnerResult>((_resolve, reject) => {
+      rejectRun = reject;
+    });
+
+    const service = await makeService({
+      run: async () => {
+        signalStarted();
+        return pending;
+      },
+      cancel: async () => {
+        rejectRun(new RunCancelledError());
+        return true;
+      },
+      isAvailable: async () => true,
+    });
+
+    const agent = await service.createAgent({ name: "Cancellation test" });
+    const { run } = await service.sendMessage(agent.id, "long-running model");
+
+    await started;
+    const stopped = await service.stopAgent(agent.id);
+
+    expect(service.getRun(run.id)).toMatchObject({
+      status: "cancelled",
+      error: "Run cancelled",
+    });
+    expect(stopped).toMatchObject({
+      status: "stopped",
+      lastError: null,
     });
   });
 });
