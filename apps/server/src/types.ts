@@ -31,6 +31,12 @@ export interface RunUsage {
   outputTokens?: number;
 }
 
+export type RunnerEvent =
+  | { kind: "thread_started" }
+  | { kind: "turn_completed"; usage: RunUsage }
+  | { kind: "item_completed"; itemType: string }
+  | { kind: "error" };
+
 export interface AgentRun {
   id: string;
   agentId: string;
@@ -78,7 +84,10 @@ export interface RunnerRequest {
 }
 
 export interface AgentRunner {
-  run(request: RunnerRequest): Promise<RunnerResult>;
+  run(
+    request: RunnerRequest,
+    onEvent?: (event: RunnerEvent) => void,
+  ): Promise<RunnerResult>;
   cancel(agentId: string): Promise<boolean>;
   isAvailable(): Promise<boolean>;
 }

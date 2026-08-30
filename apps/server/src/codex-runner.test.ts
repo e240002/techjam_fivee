@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
+import type { RunnerEvent } from "./types.js";
 
 describe("Codex runner protocol", () => {
   it("builds a new-session invocation", () => {
@@ -69,5 +70,56 @@ describe("Codex runner protocol", () => {
     expect(parsed.threadId).toBe("thread-123");
     expect(parsed.messages).toEqual(["Done."]);
     expect(parsed.usage).toEqual({ inputTokens: 10, outputTokens: 4 });
+  });
+
+  it("emits a thread_started event with no payload beyond kind", () => {
+    const parsed = { messages: [], threadId: null, usage: null, errors: [] };
+    const events: RunnerEvent[] = [];
+    parseCodexEventLine(
+      JSON.stringify({ type: "thread.started", thread_id: "thread-123" }),
+      parsed,
+      (e) => events.push(e),
+    );
+    expect(events).toEqual([{ kind: "thread_started" }]);
+  });
+
+  it("never puts the error message into the emitted event", () => {
+    const parsed = { messages: [], threadId: null, usage: null, errors: [] };
+    const events: RunnerEvent[] = [];
+    parseCodexEventLine(
+      JSON.stringify({ type: "error", message: "some sensitive detail" }),
+      parsed,
+      (e) => events.push(e),
+    );
+    expect(events).toEqual([{ kind: "error" }]); // no `message` key at all
+    expect(parsed.errors).toEqual(["some sensitive detail"]); // still fine to keep internally
+  });
+
+  it("reports item type but not text for non-agent_message items", () => {
+    const parsed = { messages: [], threadId: null, usage: null, errors: [] };
+    const events: RunnerEvent[] = [];
+    parseCodexEventLine(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "some_other_type", text: "should not leak" },
+      }),
+      parsed,
+      (e) => events.push(e),
+    );
+    expect(events).toEqual([
+      { kind: "item_completed", itemType: "some_other_type" },
+    ]);
+    expect(parsed.messages).toEqual([]); // confirms it wasn't mistaken for agent_message
+  });
+
+  it("still works with no onEvent callback passed", () => {
+    const parsed = { messages: [], threadId: null, usage: null, errors: [] };
+    expect(() =>
+      parseCodexEventLine(
+        JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5 } }),
+        parsed,
+      ),
+    ).not.toThrow();
+    expect(parsed.usage).toEqual({ inputTokens: 5 });
   });
 });
