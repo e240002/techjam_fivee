@@ -131,3 +131,28 @@ describe("Agent lifecycle", () => {
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
   });
 });
+describe("Agent run integration failures", () => {
+  it("records runner failures on the run and Agent", async () => {
+    const service = await makeService({
+      run: async () => {
+        throw new Error("runner exploded");
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+
+    const agent = await service.createAgent({ name: "Failure test" });
+    const { run } = await service.sendMessage(agent.id, "trigger failure");
+
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+
+    expect(service.getRun(run.id)).toMatchObject({
+      status: "failed",
+      error: "runner exploded",
+    });
+    expect(service.getAgent(agent.id)).toMatchObject({
+      status: "error",
+      lastError: "runner exploded",
+    });
+  });
+});
