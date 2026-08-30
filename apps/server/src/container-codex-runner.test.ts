@@ -149,7 +149,7 @@ describe("Container Codex runner", () => {
     const result = await runPromise;
 
     expect(events).toEqual([
-      { kind: "thread_started" },
+      { kind: "thread_started", threadId: "thread-abc" },
       { kind: "item_completed", itemType: "agent_message" },
       { kind: "turn_completed", usage: { inputTokens: 3, outputTokens: 2 } },
     ]);

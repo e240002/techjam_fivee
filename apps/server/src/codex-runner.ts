@@ -43,7 +43,24 @@ export function buildCodexArgs(
   return args;
 }
 
-export function parseCodexEventLine(line: string, parsed: ParsedEvents, onEvent?: (event: RunnerEvent) => void, ): void {
+function emitRunnerEvent(
+  onEvent: ((event: RunnerEvent) => void) | undefined,
+  event: RunnerEvent,
+): void {
+  if (!onEvent) return;
+
+  try {
+    onEvent(event);
+  } catch {
+    // Observability must not break Codex execution.
+  }
+}
+
+export function parseCodexEventLine(
+  line: string,
+  parsed: ParsedEvents,
+  onEvent?: (event: RunnerEvent) => void,
+): void {
   let event: Record<string, unknown>;
   try {
     event = JSON.parse(line) as Record<string, unknown>;
@@ -53,7 +70,7 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents, onEvent?
 
   if (event.type === "thread.started" && typeof event.thread_id === "string") {
     parsed.threadId = event.thread_id;
-    onEvent?.({ kind: "thread_started" });
+    emitRunnerEvent(onEvent, { kind: "thread_started", threadId: event.thread_id });
   }
 
   if (event.type === "item.completed" && event.item && typeof event.item === "object") {
@@ -62,7 +79,7 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents, onEvent?
       parsed.messages.push(item.text);
     }
     if (typeof item.type === "string") {
-      onEvent?.({ kind: "item_completed", itemType: item.type });
+      emitRunnerEvent(onEvent, { kind: "item_completed", itemType: item.type });
     }
   }
 
@@ -79,7 +96,7 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents, onEvent?
         ? { outputTokens: usage.output_tokens }
         : {}),
     };
-    if (parsed.usage) onEvent?.({ kind: "turn_completed", usage: parsed.usage });
+    if (parsed.usage) emitRunnerEvent(onEvent, { kind: "turn_completed", usage: parsed.usage });
   }
 
   if (event.type === "error") {
@@ -90,7 +107,7 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents, onEvent?
           ? event.error
           : "Codex reported an unknown error";
     parsed.errors.push(message);
-    onEvent?.({ kind: "error" });
+    emitRunnerEvent(onEvent, { kind: "error" });
   }
 }
 
@@ -273,3 +290,5 @@ export class CodexRunner implements AgentRunner {
     return environment;
   }
 }
+
+

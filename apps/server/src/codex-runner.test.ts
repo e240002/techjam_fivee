@@ -73,15 +73,15 @@ describe("Codex runner protocol", () => {
   });
 
   it("emits a thread_started event with no payload beyond kind", () => {
-    const parsed = { messages: [], threadId: null, usage: null, errors: [] };
-    const events: RunnerEvent[] = [];
-    parseCodexEventLine(
-      JSON.stringify({ type: "thread.started", thread_id: "thread-123" }),
-      parsed,
-      (e) => events.push(e),
-    );
-    expect(events).toEqual([{ kind: "thread_started" }]);
-  });
+  const parsed = { messages: [], threadId: null, usage: null, errors: [] };
+  const events: RunnerEvent[] = [];
+  parseCodexEventLine(
+    JSON.stringify({ type: "thread.started", thread_id: "thread-123" }),
+    parsed,
+    (e) => events.push(e),
+  );
+  expect(events).toEqual([{ kind: "thread_started", threadId: "thread-123" }]);
+ });
 
   it("never puts the error message into the emitted event", () => {
     const parsed = { messages: [], threadId: null, usage: null, errors: [] };
@@ -119,6 +119,20 @@ describe("Codex runner protocol", () => {
       ),
     ).not.toThrow();
     expect(parsed.usage).toEqual({ inputTokens: 5 });
+  });
+
+  it("does not let a throwing onEvent callback break parsing", () => {
+  const parsed = { messages: [], threadId: null, usage: null, errors: [] };
+  expect(() =>
+    parseCodexEventLine(
+      JSON.stringify({ type: "thread.started", thread_id: "thread-123" }),
+      parsed,
+      () => {
+        throw new Error("tracing layer blew up");
+      },
+    ),
+  ).not.toThrow();
+  expect(parsed.threadId).toBe("thread-123"); // parsing still completed correctly
   });
 });
 
