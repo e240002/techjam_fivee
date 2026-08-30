@@ -31,7 +31,7 @@ export interface RunUsage {
 }
 
 export type RunnerEvent =
-  | { kind: "thread_started" }
+  | { kind: "thread_started"; threadId: string }
   | { kind: "turn_completed"; usage: RunUsage }
   | { kind: "item_completed"; itemType: string }
   | { kind: "error" };
