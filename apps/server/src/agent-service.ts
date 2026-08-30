@@ -3,6 +3,7 @@ import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
 import { JsonStore } from "./store.js";
+import { TraceService } from "./tracing/trace-service.js";
 import type {
   Agent,
   AgentRun,
@@ -24,6 +25,7 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
+    private readonly traces: TraceService = new TraceService(),
   ) {}
 
   async initialize(): Promise<void> {
@@ -233,94 +235,190 @@ export class AgentService {
   }
 
   private async executeRun(agentAtStart: Agent, run: AgentRun): Promise<void> {
+  await this.store.mutate((database) => {
+    const storedRun = database.runs.find((item) => item.id === run.id);
+
+    if (storedRun) {
+      storedRun.status = "running";
+      storedRun.startedAt = now();
+    }
+  });
+
+  // ADDED: Create one trace for this Agent Run
+  const trace = this.traces.startTrace({
+    agentId: agentAtStart.id,
+    runId: run.id,
+  });
+
+  // ADDED: Root orchestration span for the whole executeRun lifecycle
+  const orchestrationSpan = this.traces.startSpan({
+    traceId: trace.id,
+    type: "orchestration",
+    name: "agent.run",
+  });
+
+  // ADDED:
+  // null means Codex/model execution has not started
+  // or has already completed successfully.
+  let modelSpanId: string | null = null;
+
+  try {
+    if (this.cancellationRequests.has(agentAtStart.id)) {
+      throw new RunCancelledError();
+    }
+
+    // ADDED: Start model span immediately before runner.run()
+    const modelSpan = this.traces.startSpan({
+      traceId: trace.id,
+      parentSpanId: orchestrationSpan.id,
+      type: "model",
+      name: "codex.run",
+    });
+
+    modelSpanId = modelSpan.id;
+
+    const result = await this.runner.run({
+      agentId: agentAtStart.id,
+      workspacePath: agentAtStart.workspacePath,
+      prompt: run.prompt,
+      threadId: agentAtStart.codexThreadId,
+    });
+
+    // ADDED: runner.run() succeeded, so the model span succeeded
+    this.traces.endSpan(modelSpan.id, {
+      status: "completed",
+    });
+
+    // ADDED:
+    // Clear this so a later AgentService error does not incorrectly
+    // change the already-completed model span to failed.
+    modelSpanId = null;
+
+    const completedAt = now();
+
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
-      if (storedRun) {
-        storedRun.status = "running";
-        storedRun.startedAt = now();
-      }
+      const agent = database.agents.find((item) => item.id === agentAtStart.id);
+
+      if (!storedRun || !agent) return;
+
+      storedRun.status = "completed";
+      storedRun.output = result.output;
+      storedRun.usage = result.usage;
+      storedRun.completedAt = completedAt;
+
+      database.messages.push({
+        id: randomUUID(),
+        agentId: agent.id,
+        runId: run.id,
+        role: "assistant",
+        content: result.output,
+        createdAt: completedAt,
+      });
+
+      agent.status = "ready";
+      agent.codexThreadId = result.threadId;
+      agent.lastError = null;
+      agent.updatedAt = completedAt;
     });
-    try {
-      if (this.cancellationRequests.has(agentAtStart.id)) {
-        throw new RunCancelledError();
-      }
-      const result = await this.runner.run({
-        agentId: agentAtStart.id,
-        workspacePath: agentAtStart.workspacePath,
-        prompt: run.prompt,
-        threadId: agentAtStart.codexThreadId,
-      });
-      const completedAt = now();
-      await this.store.mutate((database) => {
-        const storedRun = database.runs.find((item) => item.id === run.id);
-        const agent = database.agents.find((item) => item.id === agentAtStart.id);
-        if (!storedRun || !agent) return;
-        storedRun.status = "completed";
-        storedRun.output = result.output;
-        storedRun.usage = result.usage;
-        storedRun.completedAt = completedAt;
-        database.messages.push({
-          id: randomUUID(),
-          agentId: agent.id,
-          runId: run.id,
-          role: "assistant",
-          content: result.output,
-          createdAt: completedAt,
-        });
-        agent.status = "ready";
-        agent.codexThreadId = result.threadId;
-        agent.lastError = null;
-        agent.updatedAt = completedAt;
-      });
-    } catch (error) {
-      const completedAt = now();
-      const cancelled = error instanceof RunCancelledError;
-      const message = error instanceof Error ? error.message : String(error);
-      await this.store.mutate((database) => {
-        const storedRun = database.runs.find((item) => item.id === run.id);
-        const agent = database.agents.find((item) => item.id === agentAtStart.id);
-        if (storedRun) {
-          storedRun.status = cancelled ? "cancelled" : "failed";
-          storedRun.error = message;
-          storedRun.completedAt = completedAt;
-        }
-        if (agent) {
-          if (agent.status !== "stopped") {
-            agent.status = cancelled ? "ready" : "error";
-          }
-          agent.lastError = cancelled ? null : message;
-          agent.updatedAt = completedAt;
-        }
+
+    // ADDED: Entire AgentService orchestration succeeded
+    this.traces.endSpan(orchestrationSpan.id, {
+      status: "completed",
+    });
+
+    // ADDED: Entire trace succeeded
+    this.traces.endTrace(trace.id, "completed");
+  } catch (error) {
+    const completedAt = now();
+    const cancelled = error instanceof RunCancelledError;
+    const message = error instanceof Error ? error.message : String(error);
+
+    // ADDED: Reuse the same status for trace + spans
+    const traceStatus = cancelled ? "cancelled" : "failed";
+
+    // ADDED:
+    // Only end a model span if runner.run() actually started
+    // and has not already completed successfully.
+    if (modelSpanId) {
+      this.traces.endSpan(modelSpanId, {
+        status: traceStatus,
+        error: cancelled ? "Run cancelled" : "Execution failed",
       });
     }
+
+    // EXISTING CodeJam failure handling remains unchanged
+    await this.store.mutate((database) => {
+      const storedRun = database.runs.find((item) => item.id === run.id);
+      const agent = database.agents.find((item) => item.id === agentAtStart.id);
+
+      if (storedRun) {
+        storedRun.status = cancelled ? "cancelled" : "failed";
+        storedRun.error = message;
+        storedRun.completedAt = completedAt;
+      }
+
+      if (agent) {
+        if (agent.status !== "stopped") {
+          agent.status = cancelled ? "ready" : "error";
+        }
+
+        agent.lastError = cancelled ? null : message;
+        agent.updatedAt = completedAt;
+      }
+    });
+
+    // ADDED: Finish orchestration with failure/cancellation
+    this.traces.endSpan(orchestrationSpan.id, {
+      status: traceStatus,
+      error: cancelled ? "Run cancelled" : "Execution failed",
+    });
+
+    // ADDED: Finish the whole trace
+    this.traces.endTrace(trace.id, traceStatus);
   }
+}
 
   private async setStatus(id: string, status: Agent["status"]): Promise<Agent> {
     return this.store.mutate((database) => {
       const agent = database.agents.find((item) => item.id === id);
+
       if (!agent) {
         throw new HttpError(404, "Agent not found");
       }
+
       if (status === "ready" && agent.status === "busy") {
-        throw new HttpError(409, "Stop the active run before starting this Agent");
+        throw new HttpError(
+          409,
+          "Stop the active run before starting this Agent",
+        );
       }
+
       agent.status = status;
-      if (status === "ready") agent.lastError = null;
+
+      if (status === "ready") {
+        agent.lastError = null;
+      }
+
       agent.updatedAt = now();
+
       return structuredClone(agent);
     });
   }
 
   private async cancelExecution(agentId: string): Promise<void> {
     this.cancellationRequests.add(agentId);
+
     try {
       await this.runner.cancel(agentId);
+
       const execution = this.activeExecutions.get(agentId);
+
       if (execution) {
         await execution;
       }
     } finally {
       this.cancellationRequests.delete(agentId);
-    }
+    } 
   }
 }
