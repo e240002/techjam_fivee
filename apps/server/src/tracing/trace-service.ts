@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { JsonStore } from "../store.js";
+import type { Database } from "../types.js";
 import type {
   Span,
   SpanStatus,
@@ -24,12 +26,12 @@ export interface EndSpanInput {
 }
 
 export class TraceService {
-  private readonly traces = new Map<string, Trace>();
+  constructor(private readonly store: JsonStore) {}
 
   /**
-   * Create a new trace for an Agent Run.
+   * Create and persist a new trace for an Agent Run.
    */
-  startTrace(input: StartTraceInput): Trace {
+  async startTrace(input: StartTraceInput): Promise<Trace> {
     const now = new Date().toISOString();
 
     const trace: Trace = {
@@ -42,93 +44,101 @@ export class TraceService {
       spans: [],
     };
 
-    this.traces.set(trace.id, trace);
+    await this.store.mutate((database) => {
+      database.traces.push(trace);
+    });
 
     return trace;
   }
 
   /**
-   * Create a new span inside an existing trace.
+   * Create and persist a new span inside an existing trace.
    */
-  startSpan(input: StartSpanInput): Span {
-    const trace = this.getTrace(input.traceId);
+  async startSpan(input: StartSpanInput): Promise<Span> {
+    return this.store.mutate((database) => {
+      const trace = this.findTrace(database, input.traceId);
 
-    const span: Span = {
-      id: randomUUID(),
-      traceId: trace.id,
-      parentSpanId: input.parentSpanId ?? null,
-      type: input.type,
-      name: input.name,
-      status: "running",
-      startedAt: new Date().toISOString(),
-      completedAt: null,
-      durationMs: null,
-      error: null,
-      metadata: {},
-    };
+      const span: Span = {
+        id: randomUUID(),
+        traceId: trace.id,
+        parentSpanId: input.parentSpanId ?? null,
+        type: input.type,
+        name: input.name,
+        status: "running",
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        durationMs: null,
+        error: null,
+        metadata: {},
+      };
 
-    trace.spans.push(span);
-
-    return span;
+      trace.spans.push(span);
+      return span;
+    });
   }
 
   /**
-   * Finish a span and calculate its duration.
+   * Finish and persist a span.
    */
-  endSpan(spanId: string, input: EndSpanInput): Span {
-    const span = this.findSpan(spanId);
+  async endSpan(spanId: string, input: EndSpanInput): Promise<Span> {
+    return this.store.mutate((database) => {
+      const span = this.findSpan(database, spanId);
 
-    const completedAt = new Date();
-    const startedAt = new Date(span.startedAt);
+      const completedAt = new Date();
+      const startedAt = new Date(span.startedAt);
 
-    span.status = input.status;
-    span.completedAt = completedAt.toISOString();
-    span.durationMs =
-      completedAt.getTime() - startedAt.getTime();
+      span.status = input.status;
+      span.completedAt = completedAt.toISOString();
+      span.durationMs = completedAt.getTime() - startedAt.getTime();
 
-    if (input.error !== undefined) {
-      span.error = input.error;
-    }
+      if (input.error !== undefined) {
+        span.error = input.error;
+      }
 
-    return span;
+      return span;
+    });
   }
 
   /**
-   * Finish a trace.
+   * Finish and persist a trace.
    */
-  endTrace(traceId: string, status: SpanStatus): Trace {
-    const trace = this.getTrace(traceId);
+  async endTrace(traceId: string, status: SpanStatus): Promise<Trace> {
+    return this.store.mutate((database) => {
+      const trace = this.findTrace(database, traceId);
 
-    trace.status = status;
-    trace.completedAt = new Date().toISOString();
+      trace.status = status;
+      trace.completedAt = new Date().toISOString();
 
-    return trace;
+      return trace;
+    });
   }
 
   /**
-   * Add metadata to an existing span.
-   *
-   * Only safe, non-sensitive information should be stored here.
+   * Add safe metadata to an existing span and persist it.
    */
-  setSpanMetadata(
+  async setSpanMetadata(
     spanId: string,
     metadata: Record<string, unknown>,
-  ): Span {
-    const span = this.findSpan(spanId);
+  ): Promise<Span> {
+    return this.store.mutate((database) => {
+      const span = this.findSpan(database, spanId);
 
-    span.metadata = {
-      ...span.metadata,
-      ...metadata,
-    };
+      span.metadata = {
+        ...span.metadata,
+        ...metadata,
+      };
 
-    return span;
+      return span;
+    });
   }
 
   /**
-   * Get a trace by ID.
+   * Get a trace by trace ID.
    */
   getTrace(traceId: string): Trace {
-    const trace = this.traces.get(traceId);
+    const trace = this.store
+      .snapshot()
+      .traces.find((candidate) => candidate.id === traceId);
 
     if (!trace) {
       throw new Error(`Trace not found: ${traceId}`);
@@ -138,16 +148,39 @@ export class TraceService {
   }
 
   /**
+   * Get a trace by Run ID.
+   */
+  getTraceByRunId(runId: string): Trace | null {
+    return (
+      this.store
+        .snapshot()
+        .traces.find((trace) => trace.runId === runId) ?? null
+    );
+  }
+
+  /**
    * Get all traces.
    */
   getTraces(): Trace[] {
-    return [...this.traces.values()];
+    return this.store.snapshot().traces;
   }
 
-  private findSpan(spanId: string): Span {
-    for (const trace of this.traces.values()) {
+  private findTrace(database: Database, traceId: string): Trace {
+    const trace = database.traces.find(
+      (candidate) => candidate.id === traceId,
+    );
+
+    if (!trace) {
+      throw new Error(`Trace not found: ${traceId}`);
+    }
+
+    return trace;
+  }
+
+  private findSpan(database: Database, spanId: string): Span {
+    for (const trace of database.traces) {
       const span = trace.spans.find(
-        (span) => span.id === spanId,
+        (candidate) => candidate.id === spanId,
       );
 
       if (span) {
@@ -158,4 +191,3 @@ export class TraceService {
     throw new Error(`Span not found: ${spanId}`);
   }
 }
-

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -53,4 +53,34 @@ describe("JsonStore", () => {
       "queue recovered",
     ]);
   });
+
+  it("loads an existing database without traces", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-test-"));
+    temporaryDirectories.push(root);
+
+    const databasePath = path.join(root, "db.json");
+
+    await writeFile(
+      databasePath,
+      JSON.stringify({
+        version: 1,
+        agents: [],
+        messages: [],
+        runs: [],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(databasePath);
+    await store.initialize();
+
+    expect(store.snapshot()).toEqual({
+      version: 1,
+      agents: [],
+      messages: [],
+      runs: [],
+      traces: [],
+    });
+  });
+
 });
