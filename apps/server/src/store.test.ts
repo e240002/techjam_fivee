@@ -54,18 +54,27 @@ describe("JsonStore", () => {
     ]);
   });
 
-  it("loads an existing database without traces", async () => {
+  it("loads an existing database without traces and preserves existing data", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-test-"));
     temporaryDirectories.push(root);
 
     const databasePath = path.join(root, "db.json");
+
+    const existingMessage = {
+      id: "existing-message",
+      agentId: "existing-agent",
+      runId: "existing-run",
+      role: "user" as const,
+      content: "existing data must survive",
+      createdAt: "2026-08-30T00:00:00.000Z",
+    };
 
     await writeFile(
       databasePath,
       JSON.stringify({
         version: 1,
         agents: [],
-        messages: [],
+        messages: [existingMessage],
         runs: [],
       }),
       "utf8",
@@ -77,7 +86,7 @@ describe("JsonStore", () => {
     expect(store.snapshot()).toEqual({
       version: 1,
       agents: [],
-      messages: [],
+      messages: [existingMessage],
       runs: [],
       traces: [],
     });
