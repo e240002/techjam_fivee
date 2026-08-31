@@ -55,6 +55,7 @@ export default function App() {
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | null>(null);
   const [showTrace, setShowTrace] = useState(false);
+  const [runs, setRuns] = useState<AgentRun[]>([]);
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -114,12 +115,14 @@ export default function App() {
     setShowTrace(false);
     setShowSettings(false);
     if (!selectedId) {
+      setRuns([]);
       setMessages([]);
       return;
     }
     void Promise.all([refreshMessages(selectedId), api.runs(selectedId)])
       .then(([, result]) => {
         if (selectedIdRef.current !== selectedId) return;
+        setRuns(result.runs);
         const latest = result.runs[0] ?? null;
         setActiveRun(latest);
         if (latest && ["queued", "running"].includes(latest.status)) {
@@ -262,7 +265,12 @@ export default function App() {
         const result = await api.run(runId);
         if (selectedIdRef.current === agentId) setActiveRun(result.run);
         if (!["queued", "running"].includes(result.run.status)) {
-          await Promise.all([refreshMessages(agentId), refreshAgents()]);
+          const [, , runResult] = await Promise.all([
+            refreshMessages(agentId),
+            refreshAgents(),
+            api.runs(agentId),
+          ]);
+          if (selectedIdRef.current === agentId) setRuns(runResult.runs);
           return;
         }
       }
@@ -283,6 +291,10 @@ export default function App() {
         setMessages((current) => [...current, result.message]);
         setActiveRun(result.run);
       }
+      setRuns((current) => [
+        result.run,
+        ...current.filter((run) => run.id !== result.run.id),
+      ]);
       setAgents((current) =>
         current.map((agent) =>
           agent.id === selected.id ? { ...agent, status: "busy" } : agent,
@@ -659,6 +671,30 @@ export default function App() {
                     <h2>Trace details</h2>
                   </div>
                   <button type="button" onClick={() => setShowTrace(false)}>x</button>
+                </div>
+
+                <div className="trace-run-picker">
+                  <span className="eyebrow">Recent Runs</span>
+                  <div>
+                    {runs
+                      .filter((run) => !["queued", "running"].includes(run.status))
+                      .slice(0, 6)
+                      .map((run) => (
+                        <button
+                          className={run.id === activeRun.id ? "active" : ""}
+                          key={run.id}
+                          onClick={() => {
+                            setActiveRun(run);
+                            setShowTrace(true);
+                          }}
+                          type="button"
+                        >
+                          <span className={"trace-run-dot trace-run-" + run.status} />
+                          <span>{run.status}</span>
+                          <time>{formatTime(run.createdAt)}</time>
+                        </button>
+                      ))}
+                  </div>
                 </div>
 
                 {traceLoading && (

@@ -22,6 +22,10 @@ Volcengine ECS.
 
 ![Create Agent form with name, description, and workspace instructions](docs/assets/create-agent.jpg)
 
+### Trace Evidence
+
+![Trace Details panel showing selectable completed, cancelled, and failed Runs with correlated spans](docs/assets/trace-evidence.jpg)
+
 ## Features
 
 - React and TypeScript Web UI
@@ -53,10 +57,11 @@ responses.
 1. Create or select an Agent and show its lifecycle state.
 2. Send a small real task through the Playground and wait for completion.
 3. Open **Trace** to show the completed span tree, duration, model usage, and
-   correlated trace ID.
+   correlated trace ID. Use **Recent Runs** to switch between recorded outcomes.
 4. Start a longer task and press **Stop** while it is running.
-5. Open **Trace** again to show the cancelled orchestration/model spans and
-   demonstrate that the Agent remains controllable afterward.
+5. Select the cancelled Run under **Recent Runs** to show the cancelled
+   orchestration/model spans and demonstrate that the Agent remains
+   controllable afterward.
 
 The backend API also exposes GET /api/runs/:runId/trace and
 GET /api/traces/:traceId for reproducible inspection.

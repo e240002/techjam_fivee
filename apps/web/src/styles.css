@@ -1368,3 +1368,68 @@ textarea:focus {
     margin-left: 0 !important;
   }
 }
+.trace-run-picker {
+  margin-bottom: 16px;
+}
+
+.trace-run-picker > span {
+  display: block;
+  margin-bottom: 7px;
+}
+
+.trace-run-picker > div {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 3px;
+}
+
+.trace-run-picker button {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 7px auto;
+  gap: 2px 6px;
+  min-width: 102px;
+  padding: 7px 9px;
+  border: 1px solid #dedbd2;
+  border-radius: 8px;
+  background: white;
+  color: #6d6e67;
+  text-align: left;
+  cursor: pointer;
+}
+
+.trace-run-picker button.active {
+  border-color: #8a78e8;
+  background: #f1eefc;
+  color: #5544aa;
+  box-shadow: 0 0 0 2px rgba(105, 84, 217, 0.08);
+}
+
+.trace-run-picker button > span:nth-child(2) {
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.trace-run-picker time {
+  grid-column: 2;
+  color: #999992;
+  font-size: 8px;
+}
+
+.trace-run-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: #54a87f;
+}
+
+.trace-run-failed {
+  background: #c55a55;
+}
+
+.trace-run-cancelled {
+  background: #b78540;
+}
