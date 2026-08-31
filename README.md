@@ -66,6 +66,11 @@ responses.
 The backend API also exposes GET /api/runs/:runId/trace and
 GET /api/traces/:traceId for reproducible inspection.
 
+### Submission materials
+
+- [Three-minute demo script](docs/DEMO_SCRIPT.md)
+- [Submission write-up](docs/SUBMISSION.md)
+- [One-page architecture](docs/ARCHITECTURE.md)
 
 ## Requirements
 
