@@ -140,6 +140,35 @@ describe("HTTP boundary", () => {
     await app.close();
   });
 
+  it("does not expose unexpected internal error details", async () => {
+    const configuredSecret = "internal-configured-secret";
+    const failingService = {
+      ...service,
+      systemInfo: async () => {
+        throw new Error(`provider failed with ${configuredSecret}`);
+      },
+    } as unknown as AgentService;
+    const app = await createApp(
+      loadConfig({
+        NODE_ENV: "test",
+        LOG_LEVEL: "silent",
+        ARK_API_KEY: configuredSecret,
+      }),
+      failingService,
+      traceService,
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/system",
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({ error: "Internal server error" });
+    expect(response.body).not.toContain(configuredSecret);
+    await app.close();
+  });
+
   it("retrieves traces by trace ID and run ID without exposing secrets", async () => {
     const app = await createApp(
       loadConfig({ NODE_ENV: "test" }),

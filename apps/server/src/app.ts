@@ -53,6 +53,7 @@ export async function createApp(
   service: AgentService,
   traceService: TraceQueryService,
 ): Promise<FastifyInstance> {
+  const sensitiveValues = [config.arkApiKey, config.authToken];
   const app = Fastify({
     logger: {
       level: config.logLevel,
@@ -160,10 +161,7 @@ export async function createApp(
 
     try {
       return {
-        trace: sanitizeTrace(traceService.getTrace(traceId), [
-          config.arkApiKey,
-          config.authToken,
-        ]),
+        trace: sanitizeTrace(traceService.getTrace(traceId), sensitiveValues),
       };
     } catch (error) {
       if (error instanceof TraceNotFoundError) {
@@ -181,7 +179,7 @@ export async function createApp(
     }
 
     return {
-      trace: sanitizeTrace(trace, [config.arkApiKey, config.authToken]),
+      trace: sanitizeTrace(trace, sensitiveValues),
     };
   });
 
@@ -214,12 +212,26 @@ export async function createApp(
           : frameworkStatus && frameworkStatus >= 400 && frameworkStatus <= 599
             ? frameworkStatus
             : 500;
+    const sanitizedMessage = sanitizeText(appError.message, sensitiveValues);
     if (statusCode >= 500) {
-      request.log.error(appError);
+      request.log.error(
+        {
+          errorName: appError.name,
+          errorMessage: sanitizedMessage,
+        },
+        "Request failed",
+      );
     }
     return reply.code(statusCode).send({
-      error: appError.message,
-      ...(validationError ? { details: error.issues } : {}),
+      error: statusCode >= 500 ? "Internal server error" : sanitizedMessage,
+      ...(validationError
+        ? {
+            details: sanitizeMetadata(
+              { details: error.issues },
+              sensitiveValues,
+            ).details,
+          }
+        : {}),
     });
   });
 
