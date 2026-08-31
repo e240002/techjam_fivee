@@ -3,10 +3,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { RunCancelledError } from "./errors.js";
+import { sanitizeText } from "./tracing/redaction.js";
 import type {
   AgentRunner,
   RunUsage,
-  RunnerEvent,
+  RunnerEventHandler,
   RunnerRequest,
   RunnerResult,
 } from "./types.js";
@@ -41,24 +42,24 @@ export function buildCodexArgs(
   return args;
 }
 
-function emitRunnerEvent(
-  onEvent: ((event: RunnerEvent) => void) | undefined,
-  event: RunnerEvent,
-): void {
+async function emitRunnerEvent(
+  onEvent: RunnerEventHandler | undefined,
+  event: Parameters<RunnerEventHandler>[0],
+): Promise<void> {
   if (!onEvent) return;
 
   try {
-    onEvent(event);
+    await onEvent(event);
   } catch {
     // Observability must not break Codex execution.
   }
 }
 
-export function parseCodexEventLine(
+export async function parseCodexEventLine(
   line: string,
   parsed: ParsedEvents,
-  onEvent?: (event: RunnerEvent) => void,
-): void {
+  onEvent?: RunnerEventHandler,
+): Promise<void> {
   let event: Record<string, unknown>;
   try {
     event = JSON.parse(line) as Record<string, unknown>;
@@ -68,7 +69,7 @@ export function parseCodexEventLine(
 
   if (event.type === "thread.started" && typeof event.thread_id === "string") {
     parsed.threadId = event.thread_id;
-    emitRunnerEvent(onEvent, {
+    await emitRunnerEvent(onEvent, {
       kind: "thread_started",
       threadId: event.thread_id,
     });
@@ -80,13 +81,16 @@ export function parseCodexEventLine(
       parsed.messages.push(item.text);
     }
     if (typeof item.type === "string") {
-      emitRunnerEvent(onEvent, { kind: "item_completed", itemType: item.type });
+      await emitRunnerEvent(onEvent, {
+        kind: "item_completed",
+        itemType: item.type,
+      });
     }
   }
 
   if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
     const usage = event.usage as Record<string, unknown>;
-    parsed.usage = {
+    const parsedUsage: RunUsage = {
       ...(typeof usage.input_tokens === "number"
         ? { inputTokens: usage.input_tokens }
         : {}),
@@ -97,9 +101,10 @@ export function parseCodexEventLine(
         ? { outputTokens: usage.output_tokens }
         : {}),
     };
-    emitRunnerEvent(onEvent, {
+    parsed.usage = parsedUsage;
+    await emitRunnerEvent(onEvent, {
       kind: "turn_completed",
-      usage: parsed.usage,
+      usage: { ...parsedUsage },
     });
   }
 
@@ -110,8 +115,8 @@ export function parseCodexEventLine(
         : typeof event.error === "string"
           ? event.error
           : "Codex reported an unknown error";
-    parsed.errors.push(message);
-    emitRunnerEvent(onEvent, { kind: "error" });
+    parsed.errors.push(sanitizeText(message));
+    await emitRunnerEvent(onEvent, { kind: "error" });
   }
 }
 
@@ -155,7 +160,7 @@ export class CodexRunner implements AgentRunner {
 
   async run(
     request: RunnerRequest,
-    onEvent?: (event: RunnerEvent) => void,
+    onEvent?: RunnerEventHandler,
   ): Promise<RunnerResult> {
     if (this.active.has(request.agentId)) {
       throw new Error("Agent already has an active Codex process");
@@ -190,6 +195,13 @@ export class CodexRunner implements AgentRunner {
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
+    let eventQueue: Promise<void> = Promise.resolve();
+
+    const enqueueEventLine = (line: string): void => {
+      eventQueue = eventQueue.then(() =>
+        parseCodexEventLine(line, parsed, onEvent),
+      );
+    };
 
     const consume = (chunk: Buffer, target: "stdout" | "stderr") => {
       totalBytes += chunk.byteLength;
@@ -203,7 +215,7 @@ export class CodexRunner implements AgentRunner {
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) {
-          parseCodexEventLine(line, parsed, onEvent);
+          enqueueEventLine(line);
         }
       } else {
         stderr += chunk.toString("utf8");
@@ -228,8 +240,9 @@ export class CodexRunner implements AgentRunner {
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
-        parseCodexEventLine(stdout.trim(), parsed, onEvent);
+        enqueueEventLine(stdout.trim());
       }
+      await eventQueue;
       if (active.cancelled) {
         throw new RunCancelledError();
       }
@@ -240,7 +253,9 @@ export class CodexRunner implements AgentRunner {
         throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
       }
       if (exitCode !== 0) {
-        const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
+        const detail = sanitizeText(
+          parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail",
+        );
         throw new Error("Codex exited with code " + exitCode + ": " + detail);
       }
       const output = parsed.messages.at(-1)?.trim();

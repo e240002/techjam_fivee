@@ -1,7 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
 import { RunCancelledError } from "./errors.js";
@@ -31,6 +31,7 @@ class FakeRunner implements AgentRunner {
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   const { rm } = await import("node:fs/promises");
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
@@ -176,6 +177,52 @@ describe("Agent lifecycle", () => {
 });
 
 describe("Agent run integration failures", () => {
+  it("keeps the Run lifecycle healthy when trace setup fails", async () => {
+    const { service, traces } = await makeServiceWithTraces();
+    vi.spyOn(traces, "startTrace").mockRejectedValueOnce(
+      new Error("trace storage unavailable"),
+    );
+    const agent = await service.createAgent({ name: "Trace setup failure" });
+    const { run } = await service.sendMessage(
+      agent.id,
+      "complete without tracing",
+    );
+
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    expect(service.getAgent(agent.id).status).toBe("ready");
+    expect(service.getMessages(agent.id).map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+    expect(traces.getTraceByRunId(run.id)).toBeNull();
+  });
+
+  it("does not rewrite a successful Run when trace finalization fails", async () => {
+    const { service, traces } = await makeServiceWithTraces();
+    const endTrace = vi
+      .spyOn(traces, "endTrace")
+      .mockRejectedValueOnce(new Error("trace finalization failed"));
+    const agent = await service.createAgent({ name: "Trace finalization failure" });
+    const { run } = await service.sendMessage(agent.id, "finish successfully");
+
+    await expect.poll(() => endTrace.mock.calls.length).toBe(1);
+
+    expect(service.getRun(run.id)).toMatchObject({
+      status: "completed",
+      output: "Completed: finish successfully",
+      error: null,
+    });
+    expect(service.getAgent(agent.id)).toMatchObject({
+      status: "ready",
+      lastError: null,
+    });
+    expect(service.getMessages(agent.id).map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+  });
+
   it("records runner failures on the run, Agent, and trace", async () => {
     const { service, traces } = await makeServiceWithTraces({
       run: async () => {
@@ -273,5 +320,102 @@ describe("Agent run integration failures", () => {
     expect(trace?.spans).toEqual([
       expect.objectContaining({ type: "orchestration", status: "cancelled" }),
     ]);
+  });
+
+  it("rechecks cancellation after model span creation before invoking the runner", async () => {
+    let runnerCalled = false;
+    let releaseModelSpan!: () => void;
+    let signalModelSpanStarted!: () => void;
+    let signalCancelAttempted!: () => void;
+    const modelSpanStarted = new Promise<void>((resolve) => {
+      signalModelSpanStarted = resolve;
+    });
+    const cancelAttempted = new Promise<void>((resolve) => {
+      signalCancelAttempted = resolve;
+    });
+    const heldModelSpan = new Promise<void>((resolve) => {
+      releaseModelSpan = resolve;
+    });
+    const { service, traces } = await makeServiceWithTraces({
+      run: async () => {
+        runnerCalled = true;
+        return { output: "unexpected", threadId: "unexpected", usage: null };
+      },
+      cancel: async () => {
+        signalCancelAttempted();
+        return false;
+      },
+      isAvailable: async () => true,
+    });
+    const startSpan = traces.startSpan.bind(traces);
+    vi.spyOn(traces, "startSpan").mockImplementation(async (input) => {
+      if (input.type === "model") {
+        signalModelSpanStarted();
+        await heldModelSpan;
+      }
+      return startSpan(input);
+    });
+    const agent = await service.createAgent({ name: "Cancellation race test" });
+    const { run } = await service.sendMessage(agent.id, "cancel during tracing");
+
+    await modelSpanStarted;
+    const stop = service.stopAgent(agent.id);
+    await cancelAttempted;
+    releaseModelSpan();
+    const stopped = await stop;
+
+    expect(runnerCalled).toBe(false);
+    expect(service.getRun(run.id)).toMatchObject({
+      status: "cancelled",
+      error: "Run cancelled",
+    });
+    expect(stopped).toMatchObject({ status: "stopped", lastError: null });
+    const trace = traces.getTraceByRunId(run.id);
+    expect(trace).toMatchObject({ status: "cancelled" });
+    expect(trace?.spans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "orchestration", status: "cancelled" }),
+        expect.objectContaining({ type: "model", status: "cancelled" }),
+      ]),
+    );
+  });
+
+  it("cancels active executions during graceful shutdown", async () => {
+    let rejectRun!: (error: Error) => void;
+    let signalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const pending = new Promise<RunnerResult>((_resolve, reject) => {
+      rejectRun = reject;
+    });
+    const { service, traces } = await makeServiceWithTraces({
+      run: async () => {
+        signalStarted();
+        return pending;
+      },
+      cancel: async () => {
+        rejectRun(new RunCancelledError());
+        return true;
+      },
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Shutdown test" });
+    const { run } = await service.sendMessage(agent.id, "long-running model");
+
+    await started;
+    await service.shutdown();
+
+    expect(service.getRun(run.id)).toMatchObject({
+      status: "cancelled",
+      error: "Run cancelled",
+    });
+    expect(service.getAgent(agent.id)).toMatchObject({
+      status: "ready",
+      lastError: null,
+    });
+    expect(traces.getTraceByRunId(run.id)).toMatchObject({
+      status: "cancelled",
+    });
   });
 });

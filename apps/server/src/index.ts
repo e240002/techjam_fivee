@@ -19,9 +19,14 @@ await service.initialize();
 
 const app = await createApp(config, service, traceService);
 
+let shutdownStarted = false;
+
 const shutdown = async (signal: string) => {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   app.log.info({ signal }, "Shutting down");
   await app.close();
+  await service.shutdown();
   process.exit(0);
 };
 

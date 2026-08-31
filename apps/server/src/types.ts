@@ -37,6 +37,10 @@ export type RunnerEvent =
   | { kind: "item_completed"; itemType: string }
   | { kind: "error" };
 
+export type RunnerEventHandler = (
+  event: RunnerEvent,
+) => void | Promise<void>;
+
 export interface AgentRun {
   id: string;
   agentId: string;
@@ -86,7 +90,7 @@ export interface RunnerRequest {
 export interface AgentRunner {
   run(
     request: RunnerRequest,
-    onEvent?: (event: RunnerEvent) => void,
+    onEvent?: RunnerEventHandler,
   ): Promise<RunnerResult>;
   cancel(agentId: string): Promise<boolean>;
   isAvailable(): Promise<boolean>;

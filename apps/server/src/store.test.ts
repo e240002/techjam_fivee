@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { JsonStore } from "./store.js";
+import type { Database } from "./types.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -52,6 +53,41 @@ describe("JsonStore", () => {
     expect(store.snapshot().messages.map((message) => message.content)).toEqual([
       "queue recovered",
     ]);
+  });
+
+  it("does not publish live references after a successful mutation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-test-"));
+    temporaryDirectories.push(root);
+    const databasePath = path.join(root, "db.json");
+    const store = new JsonStore(databasePath);
+    await store.initialize();
+
+    const externalMessage = {
+      id: "message-1",
+      agentId: "agent-1",
+      runId: "run-1",
+      role: "user" as const,
+      content: "persisted content",
+      createdAt: new Date().toISOString(),
+    };
+    let retainedDatabase: Database | null = null;
+
+    const returnedMessage = await store.mutate((database) => {
+      retainedDatabase = database;
+      database.messages.push(externalMessage);
+      return database.messages[0]!;
+    });
+
+    externalMessage.content = "mutated through the input";
+    returnedMessage.content = "mutated through the result";
+    if (retainedDatabase === null) throw new Error("Mutation did not run");
+    retainedDatabase.messages[0]!.content = "mutated through the callback";
+
+    expect(store.snapshot().messages[0]?.content).toBe("persisted content");
+
+    const reloaded = new JsonStore(databasePath);
+    await reloaded.initialize();
+    expect(reloaded.snapshot().messages[0]?.content).toBe("persisted content");
   });
 
   it("loads an existing database without traces and preserves existing data", async () => {

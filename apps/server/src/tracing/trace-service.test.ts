@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { JsonStore } from "../store.js";
+import { REDACTED } from "./redaction.js";
 import { TraceService } from "./trace-service.js";
 
 const temporaryDirectories: string[] = [];
@@ -145,5 +146,96 @@ describe("TraceService persistence", () => {
     const traceService = await makeTraceService();
 
     expect(traceService.getTraceByRunId("missing-run")).toBeNull();
+  });
+
+  it("redacts span errors and metadata before persistence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-trace-test-"));
+    temporaryDirectories.push(root);
+    const databasePath = path.join(root, "db.json");
+    const store = new JsonStore(databasePath);
+    await store.initialize();
+    const service = new TraceService(store);
+    const trace = await service.startTrace({
+      agentId: "agent-redaction",
+      runId: "run-redaction",
+    });
+    const span = await service.startSpan({
+      traceId: trace.id,
+      type: "model",
+      name: "model request",
+    });
+
+    const withMetadata = await service.setSpanMetadata(span.id, {
+      toolName: "example-tool",
+      secret: "metadata-secret",
+      details: "token=metadata-token",
+      nested: { cookie: "metadata-cookie" },
+    });
+    const ended = await service.endSpan(span.id, {
+      status: "failed",
+      error:
+        'request failed: {"token":"error-token"}\nCookie: session=error-cookie; theme=dark',
+    });
+
+    expect(withMetadata.metadata).toEqual({
+      toolName: "example-tool",
+      secret: REDACTED,
+      details: `token=${REDACTED}`,
+      nested: { cookie: REDACTED },
+    });
+    expect(ended.error).not.toContain("error-token");
+    expect(ended.error).not.toContain("error-cookie");
+
+    const persisted = await readFile(databasePath, "utf8");
+    for (const secret of [
+      "metadata-secret",
+      "metadata-token",
+      "metadata-cookie",
+      "error-token",
+      "error-cookie",
+    ]) {
+      expect(persisted).not.toContain(secret);
+    }
+
+    const reloadedStore = new JsonStore(databasePath);
+    await reloadedStore.initialize();
+    const reloaded = new TraceService(reloadedStore).getTrace(trace.id);
+    expect(reloaded.spans[0]?.metadata).toEqual(withMetadata.metadata);
+    expect(reloaded.spans[0]?.error).toBe(ended.error);
+  });
+
+  it("scrubs legacy metadata when adding new metadata", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-trace-test-"));
+    temporaryDirectories.push(root);
+    const databasePath = path.join(root, "db.json");
+    const store = new JsonStore(databasePath);
+    await store.initialize();
+    const service = new TraceService(store);
+    const trace = await service.startTrace({
+      agentId: "agent-legacy",
+      runId: "run-legacy",
+    });
+    const span = await service.startSpan({
+      traceId: trace.id,
+      type: "tool",
+      name: "legacy tool",
+    });
+
+    await store.mutate((database) => {
+      database.traces[0]!.spans[0]!.metadata = {
+        secret: "legacy-secret",
+        existing: "safe value",
+      };
+    });
+    const updated = await service.setSpanMetadata(span.id, {
+      toolName: "new-tool",
+    });
+
+    expect(updated.metadata).toEqual({
+      secret: REDACTED,
+      existing: "safe value",
+      toolName: "new-tool",
+    });
+    expect(await readFile(databasePath, "utf8")).not.toContain("legacy-secret");
   });
 });

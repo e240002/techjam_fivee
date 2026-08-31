@@ -14,7 +14,10 @@ const SENSITIVE_KEYS = new Set([
   "authorization",
   "password",
   "passwd",
+  "secret",
+  "secrets",
   "token",
+  "tokens",
   "auth_token",
   "id_token",
   "access_token",
@@ -25,8 +28,11 @@ const SENSITIVE_KEYS = new Set([
   "access_key",
   "access_key_id",
   "private_key",
+  "credential",
   "credentials",
   "cookie",
+  "cookies",
+  "set_cookie",
   "ak",
   "sk",
 ]);
@@ -64,35 +70,47 @@ function isSensitiveKey(key: string): boolean {
   return (
     normalized === "token" ||
     normalized.endsWith("_token") ||
+    normalized.endsWith("_tokens") ||
     normalized.endsWith("_api_key") ||
     normalized.endsWith("_password") ||
     normalized.endsWith("_passwd") ||
     normalized.endsWith("_secret") ||
+    normalized.endsWith("_secrets") ||
     normalized.endsWith("_secret_key") ||
     normalized.endsWith("_access_key") ||
     normalized.endsWith("_access_key_id") ||
     normalized.endsWith("_private_key") ||
-    normalized.endsWith("_credentials")
+    normalized.endsWith("_credential") ||
+    normalized.endsWith("_credentials") ||
+    normalized.endsWith("_authorization") ||
+    normalized.endsWith("_cookie") ||
+    normalized.endsWith("_cookies")
   );
 }
 
 export function sanitizeText(text: string): string {
   return text
     .replace(
-      /\bAuthorization\s*[:=]\s*[^\r\n,;]+/gi,
-      `Authorization=${REDACTED}`,
-    )
-    .replace(
       /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi,
       `Bearer ${REDACTED}`,
     )
     .replace(
-      /["']?(ARK_API_KEY|API[_-]?KEY|APP_AUTH_TOKEN|PASSWORD|PASSWD|AUTH[_-]?TOKEN|ID[_-]?TOKEN|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|SESSION[_-]?TOKEN|CLIENT[_-]?SECRET|SECRET[_-]?KEY|ACCESS[_-]?KEY(?:[_-]?ID)?|PRIVATE[_-]?KEY|AK|SK)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi,
-      (match) => {
-        const separatorIndex = match.search(/[:=]/);
-        const key = match.slice(0, separatorIndex).replace(/["']/g, "");
-        return `${key}=${REDACTED}`;
+      /(["']?)((?:[A-Za-z0-9._-]*(?:token|api[_-]?key|password|passwd|secret(?:[_-]?key)?|access[_-]?key(?:[_-]?id)?|private[_-]?key|credentials?|cookie))|authorization|ak|sk)\1\s*([:=])\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|.*?)(?=(?:\s+["']?[A-Za-z][A-Za-z0-9._-]*["']?\s*[:=])|[,;}\]\r\n]|$)/gi,
+      (match, quote: string, key: string, separator: string) => {
+        if (!isSensitiveKey(key)) return match;
+        return `${quote}${key}${quote}${separator}${REDACTED}`;
       },
+    )
+    .replace(
+      /\b((?:[A-Za-z0-9._-]*(?:token|api[_-]?key|password|passwd|secret(?:[_-]?key)?|access[_-]?key(?:[_-]?id)?|private[_-]?key|credentials?|cookie))|authorization|ak|sk)\s+(is|was)\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n,;]+)/gi,
+      (match, key: string, verb: string) => {
+        if (!isSensitiveKey(key)) return match;
+        return `${key} ${verb} ${REDACTED}`;
+      },
+    )
+    .replace(
+      /\b(Authorization|Cookie|Set-Cookie)\s*[:=]\s*[^\r\n]+/gi,
+      (_match, key: string) => `${key}=${REDACTED}`,
     );
 }
 

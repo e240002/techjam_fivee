@@ -71,7 +71,9 @@ describe("Container Codex runner", () => {
     );
     expect(args).toContain("runtime:test");
     expect(args).toContain("type=bind,src=/tmp/agent-workspace,dst=/workspace");
-    expect(args).toContain("type=bind,src=/tmp/codex-home,dst=/codex-home");
+    expect(args).toContain(
+      `type=bind,src=${config.codexHome},dst=/codex-home`,
+    );
     expect(args).toContain("501:20");
     expect(args).toContain("workspace-write");
     expect(args).toContain("/workspace");
@@ -117,7 +119,9 @@ describe("Container Codex runner", () => {
         prompt: "say hi",
         threadId: null,
       },
-      (e) => events.push(e),
+      (e) => {
+        events.push(e);
+      },
     );
 
     (fakeChild.stdout as unknown as EventEmitter).emit(
@@ -175,7 +179,9 @@ describe("Container Codex runner", () => {
         prompt: "say hi",
         threadId: null,
       },
-      (e) => events.push(e),
+      (e) => {
+        events.push(e);
+      },
     );
 
     // No trailing newline: this relies on the close handler flushing the event.
@@ -196,6 +202,96 @@ describe("Container Codex runner", () => {
       kind: "item_completed",
       itemType: "agent_message",
     });
+  });
+
+  it("awaits asynchronous observers in event order", async () => {
+    const config = loadConfig({
+      NODE_ENV: "test",
+      CODEX_HOME: "/tmp/codex-home",
+      RUNTIME_PROVIDER: "container",
+    });
+    const runner = new ContainerCodexRunner(config);
+    const fakeChild = createFakeChild();
+    spawnMock.mockReturnValue(fakeChild);
+
+    let releaseFirst!: () => void;
+    let signalFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      signalFirstStarted = resolve;
+    });
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const order: string[] = [];
+    const runPromise = runner.run(
+      {
+        agentId: "agent-ordered",
+        workspacePath: "/tmp/workspace",
+        prompt: "say hi",
+        threadId: null,
+      },
+      async (event) => {
+        order.push("start:" + event.kind);
+        if (event.kind === "thread_started") {
+          signalFirstStarted();
+          await firstBlocked;
+        }
+        order.push("end:" + event.kind);
+      },
+    );
+
+    (fakeChild.stdout as unknown as EventEmitter).emit(
+      "data",
+      Buffer.from(
+        [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-ordered" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: "Done." },
+          }),
+        ].join("\n") + "\n",
+      ),
+    );
+    (fakeChild as unknown as EventEmitter).emit("close", 0);
+
+    await firstStarted;
+    expect(order).toEqual(["start:thread_started"]);
+    releaseFirst();
+    await runPromise;
+    expect(order).toEqual([
+      "start:thread_started",
+      "end:thread_started",
+      "start:item_completed",
+      "end:item_completed",
+    ]);
+  });
+
+  it("redacts stderr before exposing a container runner failure", async () => {
+    const config = loadConfig({
+      NODE_ENV: "test",
+      CODEX_HOME: "/tmp/codex-home",
+      RUNTIME_PROVIDER: "container",
+    });
+    const runner = new ContainerCodexRunner(config);
+    const fakeChild = createFakeChild();
+    spawnMock.mockReturnValue(fakeChild);
+
+    const runPromise = runner.run({
+      agentId: "agent-error",
+      workspacePath: "/tmp/workspace",
+      prompt: "fail",
+      threadId: null,
+    });
+    (fakeChild.stderr as unknown as EventEmitter).emit(
+      "data",
+      Buffer.from("APP_AUTH_TOKEN=must-not-leak"),
+    );
+    (fakeChild as unknown as EventEmitter).emit("close", 1);
+
+    const error = await runPromise.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("APP_AUTH_TOKEN=[REDACTED]");
+    expect((error as Error).message).not.toContain("must-not-leak");
   });
 
   it("still works with no onEvent callback passed", async () => {

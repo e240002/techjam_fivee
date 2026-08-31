@@ -44,9 +44,12 @@ export class JsonStore {
     let result!: T;
     const operation = this.queue.then(async () => {
       const next = structuredClone(this.data);
-      result = await mutation(next);
-      await this.persist(next);
-      this.data = next;
+      const mutationResult = await mutation(next);
+      const committed = structuredClone(next);
+      const returned = structuredClone(mutationResult);
+      await this.persist(committed);
+      this.data = committed;
+      result = returned;
     });
     this.queue = operation.catch(() => undefined);
     await operation;

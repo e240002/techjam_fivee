@@ -16,6 +16,13 @@ import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
+type TerminalTraceStatus = "completed" | "failed" | "cancelled";
+
+interface RunTraceState {
+  traceId: string | null;
+  orchestrationSpanId: string | null;
+}
+
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
@@ -46,6 +53,13 @@ export class AgentService {
         }
       }
     });
+  }
+
+  async shutdown(): Promise<void> {
+    const activeAgentIds = [...this.activeExecutions.keys()];
+    await Promise.allSettled(
+      activeAgentIds.map((agentId) => this.cancelExecution(agentId)),
+    );
   }
 
   listAgents(): Agent[] {
@@ -243,15 +257,7 @@ export class AgentService {
       }
     });
 
-    const trace = await this.traces.startTrace({
-      agentId: agentAtStart.id,
-      runId: run.id,
-    });
-    const orchestrationSpan = await this.traces.startSpan({
-      traceId: trace.id,
-      type: "orchestration",
-      name: "agent.run",
-    });
+    const trace = await this.startRunTrace(agentAtStart.id, run.id);
     let modelSpanId: string | null = null;
 
     try {
@@ -259,13 +265,11 @@ export class AgentService {
         throw new RunCancelledError();
       }
 
-      const modelSpan = await this.traces.startSpan({
-        traceId: trace.id,
-        parentSpanId: orchestrationSpan.id,
-        type: "model",
-        name: "codex.run",
-      });
-      modelSpanId = modelSpan.id;
+      modelSpanId = await this.startModelSpan(trace);
+
+      if (this.cancellationRequests.has(agentAtStart.id)) {
+        throw new RunCancelledError();
+      }
 
       const result = await this.runner.run({
         agentId: agentAtStart.id,
@@ -274,8 +278,6 @@ export class AgentService {
         threadId: agentAtStart.codexThreadId,
       });
 
-      await this.traces.endSpan(modelSpan.id, { status: "completed" });
-      modelSpanId = null;
       const completedAt = now();
 
       await this.store.mutate((database) => {
@@ -301,21 +303,13 @@ export class AgentService {
         agent.updatedAt = completedAt;
       });
 
-      await this.traces.endSpan(orchestrationSpan.id, { status: "completed" });
-      await this.traces.endTrace(trace.id, "completed");
+      await this.finalizeRunTrace(trace, modelSpanId, "completed");
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
       const message = error instanceof Error ? error.message : String(error);
       const traceStatus = cancelled ? "cancelled" : "failed";
       const traceError = cancelled ? "Run cancelled" : "Execution failed";
-
-      if (modelSpanId) {
-        await this.traces.endSpan(modelSpanId, {
-          status: traceStatus,
-          error: traceError,
-        });
-      }
 
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
@@ -334,11 +328,85 @@ export class AgentService {
         }
       });
 
-      await this.traces.endSpan(orchestrationSpan.id, {
-        status: traceStatus,
-        error: traceError,
+      await this.finalizeRunTrace(
+        trace,
+        modelSpanId,
+        traceStatus,
+        traceError,
+      );
+    }
+  }
+
+  private async startRunTrace(
+    agentId: string,
+    runId: string,
+  ): Promise<RunTraceState> {
+    let traceId: string | null = null;
+
+    try {
+      traceId = (await this.traces.startTrace({ agentId, runId })).id;
+    } catch {
+      return { traceId: null, orchestrationSpanId: null };
+    }
+
+    try {
+      const orchestrationSpan = await this.traces.startSpan({
+        traceId,
+        type: "orchestration",
+        name: "agent.run",
       });
-      await this.traces.endTrace(trace.id, traceStatus);
+      return { traceId, orchestrationSpanId: orchestrationSpan.id };
+    } catch {
+      return { traceId, orchestrationSpanId: null };
+    }
+  }
+
+  private async startModelSpan(trace: RunTraceState): Promise<string | null> {
+    if (!trace.traceId || !trace.orchestrationSpanId) return null;
+
+    try {
+      const modelSpan = await this.traces.startSpan({
+        traceId: trace.traceId,
+        parentSpanId: trace.orchestrationSpanId,
+        type: "model",
+        name: "codex.run",
+      });
+      return modelSpan.id;
+    } catch {
+      return null;
+    }
+  }
+
+  private async finalizeRunTrace(
+    trace: RunTraceState,
+    modelSpanId: string | null,
+    status: TerminalTraceStatus,
+    error?: string,
+  ): Promise<void> {
+    const spanResult = error === undefined ? { status } : { status, error };
+
+    if (modelSpanId) {
+      try {
+        await this.traces.endSpan(modelSpanId, spanResult);
+      } catch {
+        // Tracing is best-effort and must not change the Run result.
+      }
+    }
+
+    if (trace.orchestrationSpanId) {
+      try {
+        await this.traces.endSpan(trace.orchestrationSpanId, spanResult);
+      } catch {
+        // Keep attempting to close the rest of the trace.
+      }
+    }
+
+    if (trace.traceId) {
+      try {
+        await this.traces.endTrace(trace.traceId, status);
+      } catch {
+        // Tracing is best-effort and must not change the Run result.
+      }
     }
   }
 

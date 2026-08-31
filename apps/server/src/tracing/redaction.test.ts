@@ -87,7 +87,7 @@ describe("sanitizeMetadata", () => {
     });
   });
 
-    it("redacts generic token fields", () => {
+  it("redacts generic token fields", () => {
     expect(
       sanitizeMetadata({
         githubToken: "secret-one",
@@ -114,6 +114,26 @@ describe("sanitizeMetadata", () => {
       accessKeyId: REDACTED,
     });
   });
+
+  it("redacts exact and suffixed secret, credential, and cookie fields", () => {
+    expect(
+      sanitizeMetadata({
+        secret: "secret-one",
+        credential: "secret-two",
+        sessionCookie: "secret-three",
+        nested: {
+          deploymentSecrets: ["secret-four"],
+        },
+      }),
+    ).toEqual({
+      secret: REDACTED,
+      credential: REDACTED,
+      sessionCookie: REDACTED,
+      nested: {
+        deploymentSecrets: REDACTED,
+      },
+    });
+  });
 });
 
 describe("sanitizeText", () => {
@@ -138,14 +158,14 @@ describe("sanitizeText", () => {
   it("redacts Authorization credentials", () => {
     expect(
       sanitizeText("Authorization: Basic abc123"),
-  ).toBe("Authorization=[REDACTED]");
+    ).toBe("Authorization=[REDACTED]");
   });
 
   it("redacts AK and SK credentials in text", () => {
     expect(
       sanitizeText("AK=my-access-key SK=my-secret-key"),
     ).toBe("AK=[REDACTED] SK=[REDACTED]");
-  });  
+  });
 
   it("redacts credentials inside JSON-like text", () => {
     const result = sanitizeText(
@@ -163,5 +183,40 @@ describe("sanitizeText", () => {
 
     expect(result).not.toContain("private-token-value");
   });
-}
-);
+
+  it("redacts generic token and secret assignments in free text", () => {
+    const result = sanitizeText(
+      'token="private token", githubToken=github-private, secret is "phrase secret"',
+    );
+
+    expect(result).not.toContain("private token");
+    expect(result).not.toContain("github-private");
+    expect(result).not.toContain("phrase secret");
+    expect(result.match(/\[REDACTED\]/g)).toHaveLength(3);
+  });
+
+  it("redacts generic token fields inside JSON-like text", () => {
+    const result = sanitizeText(
+      'request failed: {"token":"json-private","serviceToken":"service-private"}',
+    );
+
+    expect(result).not.toContain("json-private");
+    expect(result).not.toContain("service-private");
+  });
+
+  it("redacts complete Cookie and Set-Cookie header values", () => {
+    const result = sanitizeText(
+      "Cookie: session=private-cookie; theme=dark\nSet-Cookie: refresh=private-refresh; HttpOnly",
+    );
+
+    expect(result).toBe(
+      `Cookie=${REDACTED}\nSet-Cookie=${REDACTED}`,
+    );
+  });
+
+  it("does not redact normal prose about token accounting", () => {
+    expect(
+      sanitizeText("Execution failed after the token budget was exceeded"),
+    ).toBe("Execution failed after the token budget was exceeded");
+  });
+});

@@ -7,6 +7,7 @@ import type {
   SpanType,
   Trace,
 } from "./trace-types.js";
+import { sanitizeMetadata, sanitizeText } from "./redaction.js";
 
 export interface StartTraceInput {
   agentId: string;
@@ -92,7 +93,7 @@ export class TraceService {
       span.durationMs = completedAt.getTime() - startedAt.getTime();
 
       if (input.error !== undefined) {
-        span.error = input.error;
+        span.error = input.error === null ? null : sanitizeText(input.error);
       }
 
       return span;
@@ -123,10 +124,10 @@ export class TraceService {
     return this.store.mutate((database) => {
       const span = this.findSpan(database, spanId);
 
-      span.metadata = {
+      span.metadata = sanitizeMetadata({
         ...span.metadata,
         ...metadata,
-      };
+      });
 
       return span;
     });

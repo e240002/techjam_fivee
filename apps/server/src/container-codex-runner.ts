@@ -3,10 +3,11 @@ import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
+import { sanitizeText } from "./tracing/redaction.js";
 import type {
   AgentRunner,
   RunUsage,
-  RunnerEvent,
+  RunnerEventHandler,
   RunnerRequest,
   RunnerResult,
 } from "./types.js";
@@ -140,7 +141,7 @@ export class ContainerCodexRunner implements AgentRunner {
 
   async run(
     request: RunnerRequest,
-    onEvent?: (event: RunnerEvent) => void,
+    onEvent?: RunnerEventHandler,
   ): Promise<RunnerResult> {
     if (this.active.has(request.agentId)) {
       throw new Error("Agent already has an active Runtime container");
@@ -179,6 +180,13 @@ export class ContainerCodexRunner implements AgentRunner {
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
+    let eventQueue: Promise<void> = Promise.resolve();
+
+    const enqueueEventLine = (line: string): void => {
+      eventQueue = eventQueue.then(() =>
+        parseCodexEventLine(line, parsed, onEvent),
+      );
+    };
 
     const consume = (chunk: Buffer, target: "stdout" | "stderr") => {
       totalBytes += chunk.byteLength;
@@ -191,7 +199,7 @@ export class ContainerCodexRunner implements AgentRunner {
         stdout += chunk.toString("utf8");
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
-        for (const line of lines) parseCodexEventLine(line, parsed, onEvent);
+        for (const line of lines) enqueueEventLine(line);
       } else {
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
@@ -212,7 +220,8 @@ export class ContainerCodexRunner implements AgentRunner {
         child.once("error", reject);
         child.once("close", (code) => resolve(code ?? 1));
       });
-      if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed, onEvent);
+      if (stdout.trim()) enqueueEventLine(stdout.trim());
+      await eventQueue;
       if (active.cancelled) throw new RunCancelledError();
       if (active.timedOut) {
         throw new Error("Runtime timed out after " + this.config.codexTimeoutMs + " ms");
@@ -221,7 +230,9 @@ export class ContainerCodexRunner implements AgentRunner {
         throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
       }
       if (exitCode !== 0) {
-        const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
+        const detail = sanitizeText(
+          parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail",
+        );
         throw new Error(
           this.config.containerEngine +
             " Runtime exited with code " +
