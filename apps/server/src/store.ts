@@ -7,7 +7,35 @@ const emptyDatabase = (): Database => ({
   agents: [],
   messages: [],
   runs: [],
+  traces: [],
 });
+
+interface SerializedDatabase {
+  committed: Database;
+  contents: string;
+}
+
+function serializeDatabase(data: Database): SerializedDatabase {
+  const json = JSON.stringify(data, null, 2);
+  if (json === undefined) {
+    throw new TypeError("Database is not JSON-serializable");
+  }
+  return {
+    committed: JSON.parse(json) as Database,
+    contents: json + "\n",
+  };
+}
+
+function normalizeMutationResult<T>(value: T): T {
+  // Void mutations are a supported and common call pattern.
+  if (value === undefined) return value;
+
+  const json = JSON.stringify(value);
+  if (json === undefined) {
+    throw new TypeError("Mutation result is not JSON-serializable");
+  }
+  return JSON.parse(json) as T;
+}
 
 export class JsonStore {
   private data: Database = emptyDatabase();
@@ -23,7 +51,10 @@ export class JsonStore {
       if (parsed.version !== 1 || !Array.isArray(parsed.agents)) {
         throw new Error("Unsupported database format");
       }
-      this.data = parsed;
+      this.data = {
+        ...parsed,
+        traces: Array.isArray(parsed.traces) ? parsed.traces : [],
+      };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;
@@ -40,9 +71,12 @@ export class JsonStore {
     let result!: T;
     const operation = this.queue.then(async () => {
       const next = structuredClone(this.data);
-      result = await mutation(next);
-      await this.persist(next);
-      this.data = next;
+      const mutationResult = await mutation(next);
+      const { committed, contents } = serializeDatabase(next);
+      const returned = normalizeMutationResult(mutationResult);
+      await this.persistContents(contents);
+      this.data = committed;
+      result = returned;
     });
     this.queue = operation.catch(() => undefined);
     await operation;
@@ -50,8 +84,13 @@ export class JsonStore {
   }
 
   private async persist(data: Database = this.data): Promise<void> {
+    const { contents } = serializeDatabase(data);
+    await this.persistContents(contents);
+  }
+
+  private async persistContents(contents: string): Promise<void> {
     const temporaryPath = this.filePath + ".tmp";
-    await writeFile(temporaryPath, JSON.stringify(data, null, 2) + "\n", {
+    await writeFile(temporaryPath, contents, {
       encoding: "utf8",
       mode: 0o600,
     });

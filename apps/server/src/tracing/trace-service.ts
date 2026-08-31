@@ -1,10 +1,20 @@
 import { randomUUID } from "node:crypto";
+import type { JsonStore } from "../store.js";
+import type { Database } from "../types.js";
 import type {
   Span,
   SpanStatus,
   SpanType,
   Trace,
 } from "./trace-types.js";
+import { sanitizeMetadata, sanitizeText } from "./redaction.js";
+
+export class TraceNotFoundError extends Error {
+  constructor(traceId: string) {
+    super(`Trace not found: ${traceId}`);
+    this.name = "TraceNotFoundError";
+  }
+}
 
 export interface StartTraceInput {
   agentId: string;
@@ -21,15 +31,25 @@ export interface StartSpanInput {
 export interface EndSpanInput {
   status: SpanStatus;
   error?: string | null;
+  completedAt?: string;
+}
+
+export interface FinalizeTraceInput {
+  status: SpanStatus;
+  error?: string | null;
+  completedAt?: string;
 }
 
 export class TraceService {
-  private readonly traces = new Map<string, Trace>();
+  constructor(
+    private readonly store: JsonStore,
+    private readonly sensitiveValues: readonly string[] = [],
+  ) {}
 
   /**
-   * Create a new trace for an Agent Run.
+   * Create and persist a new trace for an Agent Run.
    */
-  startTrace(input: StartTraceInput): Trace {
+  async startTrace(input: StartTraceInput): Promise<Trace> {
     const now = new Date().toISOString();
 
     const trace: Trace = {
@@ -42,93 +62,154 @@ export class TraceService {
       spans: [],
     };
 
-    this.traces.set(trace.id, trace);
+    await this.store.mutate((database) => {
+      database.traces.push(trace);
+    });
 
     return trace;
   }
 
   /**
-   * Create a new span inside an existing trace.
+   * Create and persist a new span inside an existing trace.
    */
-  startSpan(input: StartSpanInput): Span {
-    const trace = this.getTrace(input.traceId);
+  async startSpan(input: StartSpanInput): Promise<Span> {
+    return this.store.mutate((database) => {
+      const trace = this.findTrace(database, input.traceId);
 
-    const span: Span = {
-      id: randomUUID(),
-      traceId: trace.id,
-      parentSpanId: input.parentSpanId ?? null,
-      type: input.type,
-      name: input.name,
-      status: "running",
-      startedAt: new Date().toISOString(),
-      completedAt: null,
-      durationMs: null,
-      error: null,
-      metadata: {},
-    };
+      const span: Span = {
+        id: randomUUID(),
+        traceId: trace.id,
+        parentSpanId: input.parentSpanId ?? null,
+        type: input.type,
+        name: input.name,
+        status: "running",
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        durationMs: null,
+        error: null,
+        metadata: {},
+      };
 
-    trace.spans.push(span);
-
-    return span;
+      trace.spans.push(span);
+      return span;
+    });
   }
 
   /**
-   * Finish a span and calculate its duration.
+   * Finish and persist a span.
    */
-  endSpan(spanId: string, input: EndSpanInput): Span {
-    const span = this.findSpan(spanId);
+  async endSpan(spanId: string, input: EndSpanInput): Promise<Span> {
+    return this.store.mutate((database) => {
+      const span = this.findSpan(database, spanId);
 
-    const completedAt = new Date();
-    const startedAt = new Date(span.startedAt);
+      this.completeSpan(span, input, this.parseCompletedAt(input.completedAt));
 
-    span.status = input.status;
-    span.completedAt = completedAt.toISOString();
-    span.durationMs =
-      completedAt.getTime() - startedAt.getTime();
-
-    if (input.error !== undefined) {
-      span.error = input.error;
-    }
-
-    return span;
+      return span;
+    });
   }
 
   /**
-   * Finish a trace.
+   * Atomically close a trace and every span that is still running. This keeps
+   * the trace internally consistent even if the durable write fails.
    */
-  endTrace(traceId: string, status: SpanStatus): Trace {
-    const trace = this.getTrace(traceId);
+  async finalizeTrace(
+    traceId: string,
+    input: FinalizeTraceInput,
+  ): Promise<Trace> {
+    return this.store.mutate((database) => {
+      const trace = this.findTrace(database, traceId);
+      const completedAt = this.parseCompletedAt(input.completedAt);
 
-    trace.status = status;
-    trace.completedAt = new Date().toISOString();
+      for (const span of trace.spans) {
+        span.metadata = sanitizeMetadata(span.metadata, this.sensitiveValues);
 
-    return trace;
+        if (span.status === "running") {
+          this.completeSpan(span, input, completedAt);
+        } else if (span.error !== null) {
+          span.error = sanitizeText(span.error, this.sensitiveValues);
+        }
+      }
+
+      trace.status = input.status;
+      trace.completedAt = completedAt.toISOString();
+
+      return trace;
+    });
   }
 
   /**
-   * Add metadata to an existing span.
-   *
-   * Only safe, non-sensitive information should be stored here.
+   * Finish and persist a trace.
    */
-  setSpanMetadata(
+  async endTrace(traceId: string, status: SpanStatus): Promise<Trace> {
+    return this.store.mutate((database) => {
+      const trace = this.findTrace(database, traceId);
+
+      trace.status = status;
+      trace.completedAt = new Date().toISOString();
+
+      return trace;
+    });
+  }
+
+  /**
+   * Add safe metadata to an existing span and persist it.
+   */
+  async setSpanMetadata(
     spanId: string,
     metadata: Record<string, unknown>,
-  ): Span {
-    const span = this.findSpan(spanId);
+  ): Promise<Span> {
+    return this.store.mutate((database) => {
+      const span = this.findSpan(database, spanId);
 
-    span.metadata = {
-      ...span.metadata,
-      ...metadata,
-    };
+      span.metadata = sanitizeMetadata(
+        {
+          ...span.metadata,
+          ...metadata,
+        },
+        this.sensitiveValues,
+      );
 
-    return span;
+      return span;
+    });
   }
 
   /**
-   * Get a trace by ID.
+   * Get a trace by trace ID.
    */
   getTrace(traceId: string): Trace {
-    const trace = this.traces.get(traceId);
+    const trace = this.store
+      .snapshot()
+      .traces.find((candidate) => candidate.id === traceId);
+
+    if (!trace) {
+      throw new TraceNotFoundError(traceId);
+    }
+
+    return trace;
+  }
+
+  /**
+   * Get a trace by Run ID.
+   */
+  getTraceByRunId(runId: string): Trace | null {
+    return (
+      this.store
+        .snapshot()
+        .traces.find((trace) => trace.runId === runId) ?? null
+    );
+  }
+
+  /**
+   * Get all traces.
+   */
+  getTraces(): Trace[] {
+    return this.store.snapshot().traces;
+  }
+
+  private findTrace(database: Database, traceId: string): Trace {
+    const trace = database.traces.find(
+      (candidate) => candidate.id === traceId,
+    );
 
     if (!trace) {
       throw new Error(`Trace not found: ${traceId}`);
@@ -137,17 +218,10 @@ export class TraceService {
     return trace;
   }
 
-  /**
-   * Get all traces.
-   */
-  getTraces(): Trace[] {
-    return [...this.traces.values()];
-  }
-
-  private findSpan(spanId: string): Span {
-    for (const trace of this.traces.values()) {
+  private findSpan(database: Database, spanId: string): Span {
+    for (const trace of database.traces) {
       const span = trace.spans.find(
-        (span) => span.id === spanId,
+        (candidate) => candidate.id === spanId,
       );
 
       if (span) {
@@ -157,5 +231,33 @@ export class TraceService {
 
     throw new Error(`Span not found: ${spanId}`);
   }
-}
 
+  private parseCompletedAt(value?: string): Date {
+    const parsed = value === undefined ? new Date() : new Date(value);
+    return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  }
+
+  private completeSpan(
+    span: Span,
+    input: EndSpanInput | FinalizeTraceInput,
+    completedAt: Date,
+  ): void {
+    const startedAt = new Date(span.startedAt);
+    const durationMs = completedAt.getTime() - startedAt.getTime();
+
+    span.status = input.status;
+    span.completedAt = completedAt.toISOString();
+    span.durationMs = Number.isFinite(durationMs)
+      ? Math.max(0, durationMs)
+      : 0;
+
+    if (input.error !== undefined) {
+      span.error =
+        input.error === null
+          ? null
+          : sanitizeText(input.error, this.sensitiveValues);
+    } else if (span.error !== null) {
+      span.error = sanitizeText(span.error, this.sensitiveValues);
+    }
+  }
+}

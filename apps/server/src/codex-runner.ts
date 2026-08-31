@@ -1,16 +1,25 @@
 import { execFile } from "node:child_process";
 import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { RunCancelledError } from "./errors.js";
+import { sanitizeText } from "./tracing/redaction.js";
 import type {
   AgentRunner,
   RunUsage,
+  RunnerEventHandler,
   RunnerRequest,
   RunnerResult,
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+const RUNNER_EVENT_DRAIN_TIMEOUT_MS = 1_000;
+
+export interface ChildProcessCompletion {
+  exitCode: number;
+  error: unknown | null;
+}
 
 export interface ParsedEvents {
   messages: string[];
@@ -18,7 +27,6 @@ export interface ParsedEvents {
   usage: RunUsage | null;
   errors: string[];
 }
-
 export function buildCodexArgs(
   request: RunnerRequest,
   sandboxMode: AppConfig["codexSandboxMode"],
@@ -41,7 +49,74 @@ export function buildCodexArgs(
   return args;
 }
 
-export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
+async function emitRunnerEvent(
+  onEvent: RunnerEventHandler | undefined,
+  event: Parameters<RunnerEventHandler>[0],
+): Promise<void> {
+  if (!onEvent) return;
+
+  try {
+    await onEvent(event);
+  } catch {
+    // Observability must not break Codex execution.
+  }
+}
+
+export function createRunnerEventDispatcher(
+  onEvent?: RunnerEventHandler,
+): { dispatch: RunnerEventHandler; drain: () => Promise<void> } {
+  let accepting = true;
+  let queue: Promise<void> = Promise.resolve();
+
+  const dispatch: RunnerEventHandler = (event) => {
+    if (!accepting || !onEvent) return;
+    queue = queue.then(async () => {
+      if (!accepting) return;
+      await emitRunnerEvent(onEvent, event);
+    });
+  };
+
+  return {
+    dispatch,
+    async drain(): Promise<void> {
+      if (!onEvent) return;
+
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        queue,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(
+            resolve,
+            RUNNER_EVENT_DRAIN_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      accepting = false;
+    },
+  };
+}
+
+export function waitForChildProcess(
+  child: ChildProcess,
+): Promise<ChildProcessCompletion> {
+  return new Promise((resolve) => {
+    let childError: unknown | null = null;
+    child.once("error", (error) => {
+      childError = error;
+    });
+    child.once("close", (code) => {
+      resolve({ exitCode: code ?? 1, error: childError });
+    });
+  });
+}
+
+export async function parseCodexEventLine(
+  line: string,
+  parsed: ParsedEvents,
+  onEvent?: RunnerEventHandler,
+  sensitiveValues: readonly string[] = [],
+): Promise<void> {
   let event: Record<string, unknown>;
   try {
     event = JSON.parse(line) as Record<string, unknown>;
@@ -51,6 +126,10 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
 
   if (event.type === "thread.started" && typeof event.thread_id === "string") {
     parsed.threadId = event.thread_id;
+    await emitRunnerEvent(onEvent, {
+      kind: "thread_started",
+      threadId: event.thread_id,
+    });
   }
 
   if (event.type === "item.completed" && event.item && typeof event.item === "object") {
@@ -58,11 +137,17 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
     if (item.type === "agent_message" && typeof item.text === "string") {
       parsed.messages.push(item.text);
     }
+    if (typeof item.type === "string") {
+      await emitRunnerEvent(onEvent, {
+        kind: "item_completed",
+        itemType: item.type,
+      });
+    }
   }
 
   if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
     const usage = event.usage as Record<string, unknown>;
-    parsed.usage = {
+    const parsedUsage: RunUsage = {
       ...(typeof usage.input_tokens === "number"
         ? { inputTokens: usage.input_tokens }
         : {}),
@@ -73,6 +158,11 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
         ? { outputTokens: usage.output_tokens }
         : {}),
     };
+    parsed.usage = parsedUsage;
+    await emitRunnerEvent(onEvent, {
+      kind: "turn_completed",
+      usage: { ...parsedUsage },
+    });
   }
 
   if (event.type === "error") {
@@ -82,7 +172,8 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
         : typeof event.error === "string"
           ? event.error
           : "Codex reported an unknown error";
-    parsed.errors.push(message);
+    parsed.errors.push(sanitizeText(message, sensitiveValues));
+    await emitRunnerEvent(onEvent, { kind: "error" });
   }
 }
 
@@ -94,6 +185,7 @@ export class CodexRunner implements AgentRunner {
       cancelled: boolean;
       timedOut: boolean;
       outputExceeded: boolean;
+      processSettled: boolean;
       settled: Promise<void>;
       forceKillTimer: NodeJS.Timeout | null;
     }
@@ -115,7 +207,7 @@ export class CodexRunner implements AgentRunner {
 
   async cancel(agentId: string): Promise<boolean> {
     const active = this.active.get(agentId);
-    if (!active) {
+    if (!active || active.processSettled) {
       return false;
     }
     active.cancelled = true;
@@ -124,7 +216,10 @@ export class CodexRunner implements AgentRunner {
     return true;
   }
 
-  async run(request: RunnerRequest): Promise<RunnerResult> {
+  async run(
+    request: RunnerRequest,
+    onEvent?: RunnerEventHandler,
+  ): Promise<RunnerResult> {
     if (this.active.has(request.agentId)) {
       throw new Error("Agent already has an active Codex process");
     }
@@ -135,15 +230,14 @@ export class CodexRunner implements AgentRunner {
       env: this.childEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const settled = new Promise<void>((resolve) => {
-      child.once("close", () => resolve());
-      child.once("error", () => resolve());
-    });
+    const completion = waitForChildProcess(child);
+    const settled = completion.then(() => undefined);
     const active = {
       child,
       cancelled: false,
       timedOut: false,
       outputExceeded: false,
+      processSettled: false,
       settled,
       forceKillTimer: null as NodeJS.Timeout | null,
     };
@@ -158,6 +252,26 @@ export class CodexRunner implements AgentRunner {
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    const sensitiveValues = [this.config.arkApiKey, this.config.authToken];
+    const events = createRunnerEventDispatcher(onEvent);
+
+    const enqueueEventLine = (line: string): void => {
+      void parseCodexEventLine(
+        line,
+        parsed,
+        events.dispatch,
+        sensitiveValues,
+      );
+    };
+
+    const appendStderr = (text: string): void => {
+      stderr = sanitizeText(stderr + text, sensitiveValues);
+      if (stderr.length > 16_384) {
+        stderr = stderr.slice(-16_384);
+      }
+    };
 
     const consume = (chunk: Buffer, target: "stdout" | "stderr") => {
       totalBytes += chunk.byteLength;
@@ -167,17 +281,14 @@ export class CodexRunner implements AgentRunner {
         return;
       }
       if (target === "stdout") {
-        stdout += chunk.toString("utf8");
+        stdout += stdoutDecoder.write(chunk);
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) {
-          parseCodexEventLine(line, parsed);
+          enqueueEventLine(line);
         }
       } else {
-        stderr += chunk.toString("utf8");
-        if (stderr.length > 16_384) {
-          stderr = stderr.slice(-16_384);
-        }
+        appendStderr(stderrDecoder.write(chunk));
       }
     };
 
@@ -191,25 +302,50 @@ export class CodexRunner implements AgentRunner {
     timeout.unref();
 
     try {
-      const exitCode = await new Promise<number>((resolve, reject) => {
-        child.once("error", reject);
-        child.once("close", (code) => resolve(code ?? 1));
-      });
-      if (stdout.trim()) {
-        parseCodexEventLine(stdout.trim(), parsed);
+      const completionResult = await completion;
+      active.processSettled = true;
+      clearTimeout(timeout);
+      if (active.forceKillTimer) {
+        clearTimeout(active.forceKillTimer);
+        active.forceKillTimer = null;
       }
-      if (active.cancelled) {
+
+      stdout += stdoutDecoder.end();
+      appendStderr(stderrDecoder.end());
+      if (stdout.trim()) {
+        enqueueEventLine(stdout.trim());
+      }
+      const terminalState = {
+        cancelled: active.cancelled,
+        timedOut: active.timedOut,
+        outputExceeded: active.outputExceeded,
+      };
+      await events.drain();
+
+      if (terminalState.cancelled) {
         throw new RunCancelledError();
       }
-      if (active.timedOut) {
+      if (terminalState.timedOut) {
         throw new Error("Codex timed out after " + this.config.codexTimeoutMs + " ms");
       }
-      if (active.outputExceeded) {
+      if (terminalState.outputExceeded) {
         throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
       }
-      if (exitCode !== 0) {
-        const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
-        throw new Error("Codex exited with code " + exitCode + ": " + detail);
+      if (completionResult.error !== null) {
+        const message =
+          completionResult.error instanceof Error
+            ? completionResult.error.message
+            : String(completionResult.error);
+        throw new Error(sanitizeText(message, sensitiveValues));
+      }
+      if (completionResult.exitCode !== 0) {
+        const detail = sanitizeText(
+          parsed.errors.at(-1) || stderr.trim() || "No error detail",
+          sensitiveValues,
+        );
+        throw new Error(
+          "Codex exited with code " + completionResult.exitCode + ": " + detail,
+        );
       }
       const output = parsed.messages.at(-1)?.trim();
       if (!output) {

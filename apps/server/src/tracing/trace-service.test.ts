@@ -1,0 +1,306 @@
+import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { JsonStore } from "../store.js";
+import { REDACTED } from "./redaction.js";
+import { TraceNotFoundError, TraceService } from "./trace-service.js";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, { recursive: true, force: true }),
+    ),
+  );
+});
+
+async function makeTraceService(): Promise<TraceService> {
+  const root = await mkdtemp(path.join(tmpdir(), "launchpad-trace-test-"));
+  temporaryDirectories.push(root);
+
+  const store = new JsonStore(path.join(root, "db.json"));
+  await store.initialize();
+
+  return new TraceService(store);
+}
+
+describe("TraceService retrieval contract", () => {
+  it("correlates a trace with its agent and run IDs", async () => {
+    const service = await makeTraceService();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+
+    const created = await service.startTrace({ agentId, runId });
+    const retrieved = service.getTrace(created.id);
+
+    expect(retrieved).toMatchObject({
+      id: created.id,
+      agentId,
+      runId,
+      status: "running",
+    });
+  });
+
+  it("preserves parent-child span relationships", async () => {
+    const service = await makeTraceService();
+    const trace = await service.startTrace({
+      agentId: randomUUID(),
+      runId: randomUUID(),
+    });
+
+    const parent = await service.startSpan({
+      traceId: trace.id,
+      type: "orchestration",
+      name: "agent run",
+    });
+
+    const child = await service.startSpan({
+      traceId: trace.id,
+      parentSpanId: parent.id,
+      type: "model",
+      name: "model request",
+    });
+
+    const retrieved = service.getTrace(trace.id);
+
+    expect(retrieved.spans).toHaveLength(2);
+    expect(retrieved.spans[1]).toMatchObject({
+      id: child.id,
+      traceId: trace.id,
+      parentSpanId: parent.id,
+      type: "model",
+    });
+  });
+
+  it("rejects unknown trace IDs", async () => {
+    const service = await makeTraceService();
+    const missingId = randomUUID();
+
+    expect(() => service.getTrace(missingId)).toThrow(TraceNotFoundError);
+  });
+});
+
+describe("TraceService persistence", () => {
+  it("persists traces across store restart and retrieves them by id and run id", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-trace-test-"));
+    temporaryDirectories.push(root);
+
+    const databasePath = path.join(root, "db.json");
+
+    const firstStore = new JsonStore(databasePath);
+    await firstStore.initialize();
+
+    const firstTraceService = new TraceService(firstStore);
+
+    const trace = await firstTraceService.startTrace({
+      agentId: "agent-1",
+      runId: "run-1",
+    });
+
+    const span = await firstTraceService.startSpan({
+      traceId: trace.id,
+      type: "tool",
+      name: "example-tool-call",
+    });
+
+    await firstTraceService.setSpanMetadata(span.id, {
+      toolName: "example-tool",
+    });
+
+    await firstTraceService.endSpan(span.id, {
+      status: "completed",
+    });
+
+    await firstTraceService.endTrace(trace.id, "completed");
+
+    const secondStore = new JsonStore(databasePath);
+    await secondStore.initialize();
+
+    const secondTraceService = new TraceService(secondStore);
+
+    const byId = secondTraceService.getTrace(trace.id);
+    expect(byId.id).toBe(trace.id);
+    expect(byId.runId).toBe("run-1");
+    expect(byId.agentId).toBe("agent-1");
+    expect(byId.status).toBe("completed");
+    expect(byId.spans).toHaveLength(1);
+    expect(byId.spans[0]?.status).toBe("completed");
+    expect(byId.spans[0]?.metadata).toEqual({
+      toolName: "example-tool",
+    });
+
+    const byRunId = secondTraceService.getTraceByRunId("run-1");
+    expect(byRunId?.id).toBe(trace.id);
+
+    const allTraces = secondTraceService.getTraces();
+    expect(allTraces).toHaveLength(1);
+    expect(allTraces[0]?.id).toBe(trace.id);
+  });
+
+  it("returns null when no trace exists for a run id", async () => {
+    const traceService = await makeTraceService();
+
+    expect(traceService.getTraceByRunId("missing-run")).toBeNull();
+  });
+
+  it("redacts span errors and metadata before persistence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-trace-test-"));
+    temporaryDirectories.push(root);
+    const databasePath = path.join(root, "db.json");
+    const store = new JsonStore(databasePath);
+    await store.initialize();
+    const service = new TraceService(store);
+    const trace = await service.startTrace({
+      agentId: "agent-redaction",
+      runId: "run-redaction",
+    });
+    const span = await service.startSpan({
+      traceId: trace.id,
+      type: "model",
+      name: "model request",
+    });
+
+    const withMetadata = await service.setSpanMetadata(span.id, {
+      toolName: "example-tool",
+      secret: "metadata-secret",
+      details: "token=metadata-token",
+      nested: { cookie: "metadata-cookie" },
+    });
+    const ended = await service.endSpan(span.id, {
+      status: "failed",
+      error:
+        'request failed: {"token":"error-token"}\nCookie: session=error-cookie; theme=dark',
+    });
+
+    expect(withMetadata.metadata).toEqual({
+      toolName: "example-tool",
+      secret: REDACTED,
+      details: `token=${REDACTED}`,
+      nested: { cookie: REDACTED },
+    });
+    expect(ended.error).not.toContain("error-token");
+    expect(ended.error).not.toContain("error-cookie");
+
+    const persisted = await readFile(databasePath, "utf8");
+    for (const secret of [
+      "metadata-secret",
+      "metadata-token",
+      "metadata-cookie",
+      "error-token",
+      "error-cookie",
+    ]) {
+      expect(persisted).not.toContain(secret);
+    }
+
+    const reloadedStore = new JsonStore(databasePath);
+    await reloadedStore.initialize();
+    const reloaded = new TraceService(reloadedStore).getTrace(trace.id);
+    expect(reloaded.spans[0]?.metadata).toEqual(withMetadata.metadata);
+    expect(reloaded.spans[0]?.error).toBe(ended.error);
+  });
+
+  it("scrubs legacy metadata when adding new metadata", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-trace-test-"));
+    temporaryDirectories.push(root);
+    const databasePath = path.join(root, "db.json");
+    const store = new JsonStore(databasePath);
+    await store.initialize();
+    const service = new TraceService(store);
+    const trace = await service.startTrace({
+      agentId: "agent-legacy",
+      runId: "run-legacy",
+    });
+    const span = await service.startSpan({
+      traceId: trace.id,
+      type: "tool",
+      name: "legacy tool",
+    });
+
+    await store.mutate((database) => {
+      database.traces[0]!.spans[0]!.metadata = {
+        secret: "legacy-secret",
+        existing: "safe value",
+      };
+    });
+    const updated = await service.setSpanMetadata(span.id, {
+      toolName: "new-tool",
+    });
+
+    expect(updated.metadata).toEqual({
+      secret: REDACTED,
+      existing: "safe value",
+      toolName: "new-tool",
+    });
+    expect(await readFile(databasePath, "utf8")).not.toContain("legacy-secret");
+  });
+
+  it("atomically finalizes every running span at the supplied completion time", async () => {
+    const service = await makeTraceService();
+    const trace = await service.startTrace({
+      agentId: "agent-finalize",
+      runId: "run-finalize",
+    });
+    const parent = await service.startSpan({
+      traceId: trace.id,
+      type: "orchestration",
+      name: "agent run",
+    });
+    await service.startSpan({
+      traceId: trace.id,
+      parentSpanId: parent.id,
+      type: "model",
+      name: "model request",
+    });
+
+    const completedAt = new Date(Date.now() + 1_000).toISOString();
+    const finalized = await service.finalizeTrace(trace.id, {
+      status: "failed",
+      error: "token=trace-secret request failed",
+      completedAt,
+    });
+
+    expect(finalized).toMatchObject({
+      status: "failed",
+      completedAt,
+    });
+    expect(finalized.spans).toHaveLength(2);
+    for (const span of finalized.spans) {
+      expect(span.status).toBe("failed");
+      expect(span.completedAt).toBe(completedAt);
+      expect(span.durationMs).toBeGreaterThanOrEqual(0);
+      expect(span.error).toBe(`token=${REDACTED} request failed`);
+    }
+  });
+
+  it("re-scrubs a legacy span error when ending without a replacement", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-trace-test-"));
+    temporaryDirectories.push(root);
+    const databasePath = path.join(root, "db.json");
+    const store = new JsonStore(databasePath);
+    await store.initialize();
+    const service = new TraceService(store, ["bare-configured-secret"]);
+    const trace = await service.startTrace({
+      agentId: "agent-legacy-error",
+      runId: "run-legacy-error",
+    });
+    const span = await service.startSpan({
+      traceId: trace.id,
+      type: "model",
+      name: "legacy model",
+    });
+
+    await store.mutate((database) => {
+      database.traces[0]!.spans[0]!.error =
+        "provider rejected bare-configured-secret";
+    });
+    const ended = await service.endSpan(span.id, { status: "failed" });
+
+    expect(ended.error).toBe(`provider rejected ${REDACTED}`);
+    expect(await readFile(databasePath, "utf8")).not.toContain(
+      "bare-configured-secret",
+    );
+  });
+});

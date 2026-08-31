@@ -1,3 +1,4 @@
+import type { Trace } from "./tracing/trace-types.js";
 export type AgentStatus = "ready" | "busy" | "stopped" | "error";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type MessageRole = "user" | "assistant";
@@ -30,6 +31,16 @@ export interface RunUsage {
   outputTokens?: number;
 }
 
+export type RunnerEvent =
+  | { kind: "thread_started"; threadId: string }
+  | { kind: "turn_completed"; usage: RunUsage }
+  | { kind: "item_completed"; itemType: string }
+  | { kind: "error" };
+
+export type RunnerEventHandler = (
+  event: RunnerEvent,
+) => void | Promise<void>;
+
 export interface AgentRun {
   id: string;
   agentId: string;
@@ -48,6 +59,7 @@ export interface Database {
   agents: Agent[];
   messages: Message[];
   runs: AgentRun[];
+  traces: Trace[];
 }
 
 export interface CreateAgentInput {
@@ -76,7 +88,10 @@ export interface RunnerRequest {
 }
 
 export interface AgentRunner {
-  run(request: RunnerRequest): Promise<RunnerResult>;
+  run(
+    request: RunnerRequest,
+    onEvent?: RunnerEventHandler,
+  ): Promise<RunnerResult>;
   cancel(agentId: string): Promise<boolean>;
   isAvailable(): Promise<boolean>;
 }
