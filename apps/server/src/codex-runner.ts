@@ -70,7 +70,10 @@ export function createRunnerEventDispatcher(
 
   const dispatch: RunnerEventHandler = (event) => {
     if (!accepting || !onEvent) return;
-    queue = queue.then(() => emitRunnerEvent(onEvent, event));
+    queue = queue.then(async () => {
+      if (!accepting) return;
+      await emitRunnerEvent(onEvent, event);
+    });
   };
 
   return {
@@ -79,17 +82,17 @@ export function createRunnerEventDispatcher(
       if (!onEvent) return;
 
       let timer: NodeJS.Timeout | undefined;
-      const drained = await Promise.race([
-        queue.then(() => true),
-        new Promise<boolean>((resolve) => {
+      await Promise.race([
+        queue,
+        new Promise<void>((resolve) => {
           timer = setTimeout(
-            () => resolve(false),
+            resolve,
             RUNNER_EVENT_DRAIN_TIMEOUT_MS,
           );
         }),
       ]);
       if (timer) clearTimeout(timer);
-      if (!drained) accepting = false;
+      accepting = false;
     },
   };
 }

@@ -326,6 +326,7 @@ describe("Codex runner protocol", () => {
     const observerBlocked = new Promise<void>((resolve) => {
       releaseObserver = resolve;
     });
+    const observedKinds: string[] = [];
     const runPromise = runner.run(
       {
         agentId: "agent-bounded-observer",
@@ -333,19 +334,25 @@ describe("Codex runner protocol", () => {
         prompt: "say hi",
         threadId: null,
       },
-      async () => {
-        signalObserverStarted();
-        await observerBlocked;
+      async (event) => {
+        observedKinds.push(event.kind);
+        if (event.kind === "thread_started") {
+          signalObserverStarted();
+          await observerBlocked;
+        }
       },
     );
 
     (fakeChild.stdout as unknown as EventEmitter).emit(
       "data",
       Buffer.from(
-        JSON.stringify({
-          type: "item.completed",
-          item: { type: "agent_message", text: "Done." },
-        }) + "\n",
+        [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: "Done." },
+          }),
+        ].join("\n") + "\n",
       ),
     );
     (fakeChild as unknown as EventEmitter).emit("close", 0);
@@ -358,6 +365,8 @@ describe("Codex runner protocol", () => {
     );
     releaseObserver();
     await Promise.resolve();
+    await Promise.resolve();
+    expect(observedKinds).toEqual(["thread_started"]);
   });
 
   it("prioritizes cancellation when child termination emits an error", async () => {
