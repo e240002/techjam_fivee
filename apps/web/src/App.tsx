@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, setAuthToken } from "./api";
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type { Trace } from "./types";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -21,6 +22,12 @@ function formatTime(value: string): string {
     minute: "2-digit",
   }).format(new Date(value));
 }
+function formatDuration(value: number | null): string {
+  if (value === null) return "In progress";
+  if (value < 1_000) return value + " ms";
+  return (value / 1_000).toFixed(value < 10_000 ? 2 : 1) + " s";
+}
+
 
 function StatusPill({ status }: { status: Agent["status"] }) {
   return (
@@ -44,6 +51,10 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [prompt, setPrompt] = useState("");
+  const [trace, setTrace] = useState<Trace | null>(null);
+  const [traceLoading, setTraceLoading] = useState(false);
+  const [traceError, setTraceError] = useState<string | null>(null);
+  const [showTrace, setShowTrace] = useState(false);
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -98,6 +109,9 @@ export default function App() {
 
   useEffect(() => {
     setActiveRun(null);
+    setTrace(null);
+    setTraceError(null);
+    setShowTrace(false);
     setShowSettings(false);
     if (!selectedId) {
       setMessages([]);
@@ -129,6 +143,43 @@ export default function App() {
     }
   }, [selected]);
 
+
+  useEffect(() => {
+    if (!activeRun || ["queued", "running"].includes(activeRun.status)) {
+      setTrace(null);
+      setTraceError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setTraceLoading(true);
+    setTraceError(null);
+    void api
+      .traceForRun(activeRun.id)
+      .then(({ trace: nextTrace }) => {
+        if (cancelled) return;
+        setTrace(nextTrace);
+        setShowTrace(true);
+      })
+      .catch((reason) => {
+        if (cancelled) return;
+        setTrace(null);
+        setTraceError(
+          reason instanceof ApiError && reason.status === 404
+            ? "No trace was recorded for this Run."
+            : reason instanceof Error
+              ? reason.message
+              : String(reason),
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setTraceLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRun?.id, activeRun?.status]);
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, activeRun]);
@@ -483,9 +534,21 @@ export default function App() {
                   <span className="eyebrow">Playground</span>
                   <h2>Build something with your Agent</h2>
                 </div>
-                <div className="session-info">
-                  <span className="pulse" />
-                  {selected.codexThreadId ? "Session connected" : "New session"}
+                <div className="playground-tools">
+                  {activeRun && !["queued", "running"].includes(activeRun.status) && (
+                    <button
+                      className={"trace-toggle " + (showTrace ? "active" : "")}
+                      onClick={() => setShowTrace((value) => !value)}
+                      type="button"
+                    >
+                      <span className={"trace-toggle-dot trace-toggle-" + activeRun.status} />
+                      Trace{trace ? " - " + trace.spans.length + " spans" : ""}
+                    </button>
+                  )}
+                  <div className="session-info">
+                    <span className="pulse" />
+                    {selected.codexThreadId ? "Session connected" : "New session"}
+                  </div>
                 </div>
               </div>
 
@@ -541,6 +604,12 @@ export default function App() {
                 <div ref={messageEnd} />
               </div>
 
+                {activeRun?.status === "cancelled" && (
+                  <article className="run-error run-cancelled">
+                    <strong>Run cancelled</strong>
+                    <span>The trace shows where execution stopped.</span>
+                  </article>
+                )}
               <form className="composer" onSubmit={sendMessage}>
                 <textarea
                   value={prompt}
@@ -582,6 +651,84 @@ export default function App() {
                 </div>
               </form>
             </section>
+            {showTrace && activeRun && (
+              <section className="trace-panel" aria-live="polite">
+                <div className="trace-panel-heading">
+                  <div>
+                    <span className="eyebrow">Run evidence</span>
+                    <h2>Trace details</h2>
+                  </div>
+                  <button type="button" onClick={() => setShowTrace(false)}>x</button>
+                </div>
+
+                {traceLoading && (
+                  <div className="trace-empty"><Spinner /> Loading persisted trace...</div>
+                )}
+                {traceError && <div className="trace-empty trace-error-box">{traceError}</div>}
+                {trace && (
+                  <>
+                    <div className="trace-summary">
+                      <div>
+                        <span>Status</span>
+                        <strong className={"trace-status-" + trace.status}>{trace.status}</strong>
+                      </div>
+                      <div>
+                        <span>Duration</span>
+                        <strong>
+                          {formatDuration(
+                            trace.completedAt
+                              ? Math.max(
+                                  0,
+                                  new Date(trace.completedAt).getTime() -
+                                    new Date(trace.startedAt).getTime(),
+                                )
+                              : null,
+                          )}
+                        </strong>
+                      </div>
+                      <div>
+                        <span>Spans</span>
+                        <strong>{trace.spans.length}</strong>
+                      </div>
+                    </div>
+                    <ol className="trace-tree">
+                      {trace.spans.map((span) => (
+                        <li
+                          className="trace-span"
+                          key={span.id}
+                          style={{ marginLeft: span.parentSpanId ? 22 : 0 }}
+                        >
+                          <span className={"trace-node trace-node-" + span.status} />
+                          <div className="trace-span-copy">
+                            <div className="trace-span-heading">
+                              <strong>{span.name}</strong>
+                              <span>{formatDuration(span.durationMs)}</span>
+                            </div>
+                            <div className="trace-span-labels">
+                              <span>{span.type}</span>
+                              <span className={"trace-status trace-status-" + span.status}>
+                                {span.status}
+                              </span>
+                            </div>
+                            {Object.keys(span.metadata).length > 0 && (
+                              <code className="trace-metadata">
+                                {JSON.stringify(span.metadata)}
+                              </code>
+                            )}
+                            {span.error && <p className="trace-span-error">{span.error}</p>}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                    <div className="trace-id">
+                      <span>Trace ID</span>
+                      <code>{trace.id}</code>
+                    </div>
+                  </>
+                )}
+              </section>
+            )}
+
           </>
         ) : (
           <div className="no-agent">

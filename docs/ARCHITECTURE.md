@@ -6,13 +6,18 @@ Volc Agent Launchpad is a single-node control plane for hackathon use.
 flowchart LR
     UI["React Web UI"] --> API["Fastify API"]
     API --> Service["AgentService"]
-    Service --> Store["JSON store"]
+    API -->|Trace lookup| Trace["TraceService"]
+    Service -->|Run lifecycle| Trace
+    Trace -->|Sanitized traces| Store["JSON store"]
+    Service -->|Agents, Runs, messages| Store
     Service --> Workspace["Agent workspace"]
     Service --> Runner{"AgentRunner"}
+    Runner -->|Safe events and usage| Service
     Runner -->|Local POC| Container["Disposable Runtime container"]
     Runner -->|ECS| Process["Codex child process"]
     Container --> Ark["Volcengine Ark"]
     Process --> Ark
+    API -->|Trace evidence| UI
 ```
 
 ## Components
@@ -20,7 +25,8 @@ flowchart LR
 ### Web UI
 
 Lists Agents, manages lifecycle actions, submits prompts, and polls asynchronous
-Runs. It never receives the Ark API key.
+Runs. The Trace panel retrieves persisted evidence for terminal Runs. The UI
+never receives the Ark API key.
 
 ### Fastify API
 
@@ -41,10 +47,26 @@ stopped  error
 
 Interrupted Runs become `cancelled` after a restart.
 
+### Trace and audit middleware
+
+AgentService starts a trace after a Run enters running, creates the agent.run
+orchestration span, and creates codex.run immediately before the Runtime
+executes. Runner callbacks contribute structural event counts and model usage
+without recording prompts, outputs, thread IDs, or environment variables.
+
+TraceService sanitizes metadata and errors before writing them to the existing
+JSON store. Traces survive restarts and are retrievable by trace ID or Run ID.
+The API sanitizes them again with the configured credential values before the
+Web UI renders the span tree.
+
+Tracing is deliberately best-effort so an observability failure cannot change
+the underlying Run outcome.
+
+
 ### Storage
 
 ```text
-data/launchpad.json       Agent, message, and Run metadata
+data/launchpad.json       Agent, message, Run, and sanitized Trace metadata
 workspaces/AgentID/       Agent-created files
 workspaces/.deleted/      Archived deleted workspaces
 codex-home/               Codex configuration and sessions

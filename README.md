@@ -8,8 +8,8 @@ Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
 
 > [!WARNING]
-> This is a single-user proof of concept. It intentionally has no identity,
-> tracing, audit, or hardened sandbox middleware. Do not use production data or
+> This is a single-user proof of concept with trace and audit middleware. It
+> intentionally has no identity or hardened multi-tenant sandbox. Do not use production data or
 > credentials. See [SECURITY.md](SECURITY.md).
 
 ## Screenshots
@@ -30,6 +30,37 @@ Volcengine ECS.
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
 - Docker and Terraform deployment paths for Volcengine ECS
+- Persistent, correlated Run traces with safe model usage and event metadata
+
+## Middleware: Trace, Audit, and Observability
+
+This submission adds a backend observability path without changing how Agents
+execute. Every real Agent Run creates a persisted trace with an orchestration
+span and a child model span. Terminal status, duration, model usage, safe event
+counts, and redacted errors are available through the API and the Playground's
+**Trace** panel.
+
+    Agent Run
+    +-- agent.run (orchestration)
+        +-- codex.run (model)
+
+Tracing is best-effort: an observability write failure does not change the Agent
+Run result. Trace metadata is sanitized before persistence and again before API
+responses.
+
+### Three-minute demo flow
+
+1. Create or select an Agent and show its lifecycle state.
+2. Send a small real task through the Playground and wait for completion.
+3. Open **Trace** to show the completed span tree, duration, model usage, and
+   correlated trace ID.
+4. Start a longer task and press **Stop** while it is running.
+5. Open **Trace** again to show the cancelled orchestration/model spans and
+   demonstrate that the Agent remains controllable afterward.
+
+The backend API also exposes GET /api/runs/:runId/trace and
+GET /api/traces/:traceId for reproducible inspection.
+
 
 ## Requirements
 
