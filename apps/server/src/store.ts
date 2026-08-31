@@ -10,6 +10,33 @@ const emptyDatabase = (): Database => ({
   traces: [],
 });
 
+interface SerializedDatabase {
+  committed: Database;
+  contents: string;
+}
+
+function serializeDatabase(data: Database): SerializedDatabase {
+  const json = JSON.stringify(data, null, 2);
+  if (json === undefined) {
+    throw new TypeError("Database is not JSON-serializable");
+  }
+  return {
+    committed: JSON.parse(json) as Database,
+    contents: json + "\n",
+  };
+}
+
+function normalizeMutationResult<T>(value: T): T {
+  // Void mutations are a supported and common call pattern.
+  if (value === undefined) return value;
+
+  const json = JSON.stringify(value);
+  if (json === undefined) {
+    throw new TypeError("Mutation result is not JSON-serializable");
+  }
+  return JSON.parse(json) as T;
+}
+
 export class JsonStore {
   private data: Database = emptyDatabase();
   private queue: Promise<void> = Promise.resolve();
@@ -45,9 +72,9 @@ export class JsonStore {
     const operation = this.queue.then(async () => {
       const next = structuredClone(this.data);
       const mutationResult = await mutation(next);
-      const committed = structuredClone(next);
-      const returned = structuredClone(mutationResult);
-      await this.persist(committed);
+      const { committed, contents } = serializeDatabase(next);
+      const returned = normalizeMutationResult(mutationResult);
+      await this.persistContents(contents);
       this.data = committed;
       result = returned;
     });
@@ -57,8 +84,13 @@ export class JsonStore {
   }
 
   private async persist(data: Database = this.data): Promise<void> {
+    const { contents } = serializeDatabase(data);
+    await this.persistContents(contents);
+  }
+
+  private async persistContents(contents: string): Promise<void> {
     const temporaryPath = this.filePath + ".tmp";
-    await writeFile(temporaryPath, JSON.stringify(data, null, 2) + "\n", {
+    await writeFile(temporaryPath, contents, {
       encoding: "utf8",
       mode: 0o600,
     });

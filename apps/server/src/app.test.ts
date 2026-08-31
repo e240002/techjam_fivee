@@ -3,6 +3,7 @@ import { createApp, type TraceQueryService } from "./app.js";
 import type { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
 import type { Trace } from "./tracing/trace-types.js";
+import { TraceNotFoundError } from "./tracing/trace-service.js";
 
 const service = {
   listAgents: () => [],
@@ -43,7 +44,7 @@ const trace: Trace = {
 const traceService: TraceQueryService = {
   getTrace: (requestedTraceId) => {
     if (requestedTraceId !== traceId) {
-      throw new Error(`Trace not found: ${requestedTraceId}`);
+      throw new TraceNotFoundError(requestedTraceId);
     }
     return structuredClone(trace);
   },
@@ -76,6 +77,33 @@ describe("HTTP boundary", () => {
       },
     });
     expect(allowed.statusCode).toBe(200);
+
+    const deniedTrace = await app.inject({
+      method: "GET",
+      url: `/api/traces/${traceId}`,
+    });
+    expect(deniedTrace.statusCode).toBe(401);
+
+    const allowedTrace = await app.inject({
+      method: "GET",
+      url: `/api/traces/${traceId}`,
+      headers: {
+        authorization: "Bearer a-strong-test-token",
+      },
+    });
+    expect(allowedTrace.statusCode).toBe(200);
+
+    const healthWithQuery = await app.inject({
+      method: "GET",
+      url: "/api/health?probe=ready",
+    });
+    expect(healthWithQuery.statusCode).toBe(200);
+
+    const authWithQuery = await app.inject({
+      method: "GET",
+      url: "/api/auth?nonce=test",
+    });
+    expect(authWithQuery.statusCode).toBe(200);
 
     await app.close();
   });
@@ -159,6 +187,41 @@ describe("HTTP boundary", () => {
       },
     });
 
+    await app.close();
+  });
+
+  it("scrubs exact configured secrets from legacy trace responses", async () => {
+    const configuredSecret = "legacy-bare-configured-secret";
+    const legacyTraceService: TraceQueryService = {
+      getTrace: () => ({
+        ...structuredClone(trace),
+        spans: [
+          {
+            ...structuredClone(trace.spans[0]!),
+            error: `provider rejected ${configuredSecret}`,
+            metadata: { detail: `failure ${configuredSecret}` },
+          },
+        ],
+      }),
+      getTraceByRunId: () => null,
+    };
+    const app = await createApp(
+      loadConfig({
+        NODE_ENV: "test",
+        ARK_API_KEY: configuredSecret,
+      }),
+      service,
+      legacyTraceService,
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/traces/${traceId}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain(configuredSecret);
+    expect(response.body).toContain("[REDACTED]");
     await app.close();
   });
 

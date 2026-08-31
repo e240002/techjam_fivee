@@ -1,7 +1,13 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
+import {
+  buildCodexArgs,
+  createRunnerEventDispatcher,
+  parseCodexEventLine,
+  waitForChildProcess,
+} from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
 import { sanitizeText } from "./tracing/redaction.js";
 import type {
@@ -20,8 +26,10 @@ interface ActiveContainer {
   cancelled: boolean;
   timedOut: boolean;
   outputExceeded: boolean;
+  processSettled: boolean;
   settled: Promise<void>;
   termination: Promise<void> | null;
+  forceKillTimer: NodeJS.Timeout | null;
 }
 
 interface ParsedEvents {
@@ -114,7 +122,7 @@ export class ContainerCodexRunner implements AgentRunner {
 
   async cancel(agentId: string): Promise<boolean> {
     const active = this.active.get(agentId);
-    if (!active) return false;
+    if (!active || active.processSettled) return false;
 
     active.cancelled = true;
     await this.removeContainer(active);
@@ -132,8 +140,13 @@ export class ContainerCodexRunner implements AgentRunner {
         .then(() => undefined)
         .catch(() => {
           active.child.kill("SIGTERM");
-          const forceKill = setTimeout(() => active.child.kill("SIGKILL"), 3_000);
-          forceKill.unref();
+          if (!active.forceKillTimer) {
+            active.forceKillTimer = setTimeout(
+              () => active.child.kill("SIGKILL"),
+              3_000,
+            );
+            active.forceKillTimer.unref();
+          }
         });
     }
     return active.termination;
@@ -156,18 +169,18 @@ export class ContainerCodexRunner implements AgentRunner {
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
-    const settled = new Promise<void>((resolve) => {
-      child.once("close", () => resolve());
-      child.once("error", () => resolve());
-    });
+    const completion = waitForChildProcess(child);
+    const settled = completion.then(() => undefined);
     const active: ActiveContainer = {
       child,
       containerName: containerName(request.agentId, this.config.runtimeInstanceId),
       cancelled: false,
       timedOut: false,
       outputExceeded: false,
+      processSettled: false,
       settled,
       termination: null,
+      forceKillTimer: null,
     };
     this.active.set(request.agentId, active);
 
@@ -180,12 +193,23 @@ export class ContainerCodexRunner implements AgentRunner {
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
-    let eventQueue: Promise<void> = Promise.resolve();
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    const sensitiveValues = [this.config.arkApiKey, this.config.authToken];
+    const events = createRunnerEventDispatcher(onEvent);
 
     const enqueueEventLine = (line: string): void => {
-      eventQueue = eventQueue.then(() =>
-        parseCodexEventLine(line, parsed, onEvent),
+      void parseCodexEventLine(
+        line,
+        parsed,
+        events.dispatch,
+        sensitiveValues,
       );
+    };
+
+    const appendStderr = (text: string): void => {
+      stderr = sanitizeText(stderr + text, sensitiveValues);
+      if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
     };
 
     const consume = (chunk: Buffer, target: "stdout" | "stderr") => {
@@ -196,13 +220,12 @@ export class ContainerCodexRunner implements AgentRunner {
         return;
       }
       if (target === "stdout") {
-        stdout += chunk.toString("utf8");
+        stdout += stdoutDecoder.write(chunk);
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) enqueueEventLine(line);
       } else {
-        stderr += chunk.toString("utf8");
-        if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
+        appendStderr(stderrDecoder.write(chunk));
       }
     };
 
@@ -216,27 +239,47 @@ export class ContainerCodexRunner implements AgentRunner {
     timeout.unref();
 
     try {
-      const exitCode = await new Promise<number>((resolve, reject) => {
-        child.once("error", reject);
-        child.once("close", (code) => resolve(code ?? 1));
-      });
+      const completionResult = await completion;
+      active.processSettled = true;
+      clearTimeout(timeout);
+      if (active.forceKillTimer) {
+        clearTimeout(active.forceKillTimer);
+        active.forceKillTimer = null;
+      }
+
+      stdout += stdoutDecoder.end();
+      appendStderr(stderrDecoder.end());
       if (stdout.trim()) enqueueEventLine(stdout.trim());
-      await eventQueue;
-      if (active.cancelled) throw new RunCancelledError();
-      if (active.timedOut) {
+      const terminalState = {
+        cancelled: active.cancelled,
+        timedOut: active.timedOut,
+        outputExceeded: active.outputExceeded,
+      };
+      await events.drain();
+
+      if (terminalState.cancelled) throw new RunCancelledError();
+      if (terminalState.timedOut) {
         throw new Error("Runtime timed out after " + this.config.codexTimeoutMs + " ms");
       }
-      if (active.outputExceeded) {
+      if (terminalState.outputExceeded) {
         throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
       }
-      if (exitCode !== 0) {
+      if (completionResult.error !== null) {
+        const message =
+          completionResult.error instanceof Error
+            ? completionResult.error.message
+            : String(completionResult.error);
+        throw new Error(sanitizeText(message, sensitiveValues));
+      }
+      if (completionResult.exitCode !== 0) {
         const detail = sanitizeText(
-          parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail",
+          parsed.errors.at(-1) || stderr.trim() || "No error detail",
+          sensitiveValues,
         );
         throw new Error(
           this.config.containerEngine +
             " Runtime exited with code " +
-            exitCode +
+            completionResult.exitCode +
             ": " +
             detail,
         );
@@ -246,6 +289,7 @@ export class ContainerCodexRunner implements AgentRunner {
       return { output, threadId: parsed.threadId, usage: parsed.usage };
     } finally {
       clearTimeout(timeout);
+      if (active.forceKillTimer) clearTimeout(active.forceKillTimer);
       this.active.delete(request.agentId);
     }
   }

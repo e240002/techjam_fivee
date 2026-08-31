@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { REDACTED, sanitizeMetadata, sanitizeText } from "./redaction.js";
+import {
+  CIRCULAR,
+  REDACTED,
+  sanitizeMetadata,
+  sanitizeText,
+} from "./redaction.js";
 
 describe("sanitizeMetadata", () => {
   it("redacts API keys", () => {
@@ -87,6 +92,15 @@ describe("sanitizeMetadata", () => {
     });
   });
 
+  it("redacts exact configured values in otherwise safe metadata", () => {
+    expect(
+      sanitizeMetadata(
+        { detail: "Invalid API key: ark-secret-value" },
+        ["ark-secret-value"],
+      ),
+    ).toEqual({ detail: `Invalid API key: ${REDACTED}` });
+  });
+
   it("redacts generic token fields", () => {
     expect(
       sanitizeMetadata({
@@ -143,6 +157,16 @@ describe("sanitizeText", () => {
     ).toBe("Authorization failed: Bearer [REDACTED]");
   });
 
+  it("redacts exact configured values without rescanning markers", () => {
+    expect(
+      sanitizeText(
+        "Invalid API key: ark-secret-value; repeated ark-secret-value",
+        ["ark-secret-value", "RED"],
+      ),
+    ).toBe(`Invalid API key: ${REDACTED}; repeated ${REDACTED}`);
+    expect(sanitizeText(REDACTED, ["RED"])).toBe(REDACTED);
+  });
+
   it("redacts environment-style API keys", () => {
     expect(
       sanitizeText("ARK_API_KEY=mysecret"),
@@ -195,6 +219,37 @@ describe("sanitizeText", () => {
     expect(result.match(/\[REDACTED\]/g)).toHaveLength(3);
   });
 
+  it("redacts plural sensitive assignments", () => {
+    const result = sanitizeText(
+      "tokens=alpha deploymentSecrets=beta cookies=gamma",
+    );
+
+    expect(result).toBe(
+      `tokens=${REDACTED} deploymentSecrets=${REDACTED} cookies=${REDACTED}`,
+    );
+  });
+
+  it("redacts complete sensitive array and object values", () => {
+    const result = sanitizeText(
+      'tokens=["alpha","beta"] secret={value:"gamma",nested:{token:"delta"}}',
+    );
+
+    expect(result).toBe(`tokens=${REDACTED} secret=${REDACTED}`);
+  });
+
+  it("preserves diagnostics after an unquoted secret assignment", () => {
+    expect(sanitizeText("token=abc request failed after 3 retries")).toBe(
+      `token=${REDACTED} request failed after 3 retries`,
+    );
+  });
+
+  it("redacts sensitive suffixes on long keys", () => {
+    const longKey = `${"a".repeat(256)}Token`;
+    expect(sanitizeText(`${longKey}=private`)).toBe(
+      `${longKey}=${REDACTED}`,
+    );
+  });
+
   it("redacts generic token fields inside JSON-like text", () => {
     const result = sanitizeText(
       'request failed: {"token":"json-private","serviceToken":"service-private"}',
@@ -218,5 +273,50 @@ describe("sanitizeText", () => {
     expect(
       sanitizeText("Execution failed after the token budget was exceeded"),
     ).toBe("Execution failed after the token budget was exceeded");
+    expect(sanitizeText("This token is expired")).toBe("This token is expired");
+    expect(sanitizeText("token is abc123.xyz")).toBe(
+      `token is ${REDACTED}`,
+    );
+    expect(sanitizeText('secrets are "alpha beta"')).toBe(
+      `secrets are ${REDACTED}`,
+    );
+  });
+
+  it("is idempotent for already-redacted values", () => {
+    const sanitized = [
+      `token=${REDACTED}`,
+      `Authorization=${REDACTED}`,
+      `Cookie=${REDACTED}`,
+    ].join("\n");
+
+    expect(sanitizeText(sanitized)).toBe(sanitized);
+  });
+
+  it("handles long non-sensitive text without pathological backtracking", () => {
+    const input = "a".repeat(100_000);
+    const startedAt = performance.now();
+
+    expect(sanitizeText(input)).toBe(input);
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("normalizes cyclic and non-JSON metadata safely", () => {
+    const cyclic: Record<string, unknown> = {
+      finite: 1,
+      notFinite: Number.POSITIVE_INFINITY,
+      missing: undefined,
+      bigint: 12n,
+      createdAt: new Date("2026-08-31T00:00:00.000Z"),
+    };
+    cyclic.self = cyclic;
+
+    expect(sanitizeMetadata(cyclic)).toEqual({
+      finite: 1,
+      notFinite: null,
+      missing: null,
+      bigint: "12",
+      createdAt: "2026-08-31T00:00:00.000Z",
+      self: CIRCULAR,
+    });
   });
 });

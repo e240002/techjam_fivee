@@ -22,6 +22,7 @@ import {
   CodexRunner,
   parseCodexEventLine,
 } from "./codex-runner.js";
+import { RunCancelledError } from "./errors.js";
 import type { RunnerEvent } from "./types.js";
 
 function createFakeChild(): ChildProcess {
@@ -42,6 +43,7 @@ function createFakeChild(): ChildProcess {
 
 describe("Codex runner protocol", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     spawnMock.mockReset();
   });
@@ -134,14 +136,18 @@ describe("Codex runner protocol", () => {
     const parsed = { messages: [], threadId: null, usage: null, errors: [] };
     const events: RunnerEvent[] = [];
     await parseCodexEventLine(
-      JSON.stringify({ type: "error", message: "API_KEY=some-sensitive-detail" }),
+      JSON.stringify({
+        type: "error",
+        message: "Invalid API key provided: some-sensitive-detail",
+      }),
       parsed,
       (e) => {
         events.push(e);
       },
+      ["some-sensitive-detail"],
     );
     expect(events).toEqual([{ kind: "error" }]); // no `message` key at all
-    expect(parsed.errors).toEqual(["API_KEY=[REDACTED]"]);
+    expect(parsed.errors).toEqual(["Invalid API key provided: [REDACTED]"]);
   });
 
   it("reports item type but not text for non-agent_message items", async () => {
@@ -264,10 +270,155 @@ describe("Codex runner protocol", () => {
     ]);
   });
 
+  it("preserves UTF-8 characters split across stdout chunks", async () => {
+    const config = loadConfig({
+      NODE_ENV: "test",
+      CODEX_HOME: "/tmp/codex-home",
+    });
+    const runner = new CodexRunner(config);
+    const fakeChild = createFakeChild();
+    spawnMock.mockReturnValue(fakeChild);
+
+    const runPromise = runner.run({
+      agentId: "agent-unicode",
+      workspacePath: "/tmp/workspace",
+      prompt: "say hi",
+      threadId: null,
+    });
+    const payload = Buffer.from(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "你好" },
+      }) + "\n",
+    );
+    const splitAt = payload.indexOf(Buffer.from("好")) + 1;
+    (fakeChild.stdout as unknown as EventEmitter).emit(
+      "data",
+      payload.subarray(0, splitAt),
+    );
+    (fakeChild.stdout as unknown as EventEmitter).emit(
+      "data",
+      payload.subarray(splitAt),
+    );
+    (fakeChild as unknown as EventEmitter).emit("close", 0);
+
+    await expect(runPromise).resolves.toEqual(
+      expect.objectContaining({ output: "你好" }),
+    );
+  });
+
+  it("bounds observer drain after process completion", async () => {
+    vi.useFakeTimers();
+    const config = loadConfig({
+      NODE_ENV: "test",
+      CODEX_HOME: "/tmp/codex-home",
+      CODEX_TIMEOUT_MS: "1000",
+    });
+    const runner = new CodexRunner(config);
+    const fakeChild = createFakeChild();
+    spawnMock.mockReturnValue(fakeChild);
+
+    let signalObserverStarted!: () => void;
+    let releaseObserver!: () => void;
+    const observerStarted = new Promise<void>((resolve) => {
+      signalObserverStarted = resolve;
+    });
+    const observerBlocked = new Promise<void>((resolve) => {
+      releaseObserver = resolve;
+    });
+    const runPromise = runner.run(
+      {
+        agentId: "agent-bounded-observer",
+        workspacePath: "/tmp/workspace",
+        prompt: "say hi",
+        threadId: null,
+      },
+      async () => {
+        signalObserverStarted();
+        await observerBlocked;
+      },
+    );
+
+    (fakeChild.stdout as unknown as EventEmitter).emit(
+      "data",
+      Buffer.from(
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "Done." },
+        }) + "\n",
+      ),
+    );
+    (fakeChild as unknown as EventEmitter).emit("close", 0);
+
+    await observerStarted;
+    expect(await runner.cancel("agent-bounded-observer")).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(runPromise).resolves.toEqual(
+      expect.objectContaining({ output: "Done." }),
+    );
+    releaseObserver();
+    await Promise.resolve();
+  });
+
+  it("prioritizes cancellation when child termination emits an error", async () => {
+    const config = loadConfig({
+      NODE_ENV: "test",
+      CODEX_HOME: "/tmp/codex-home",
+    });
+    const runner = new CodexRunner(config);
+    const fakeChild = createFakeChild();
+    spawnMock.mockReturnValue(fakeChild);
+
+    const runPromise = runner.run({
+      agentId: "agent-cancel-error",
+      workspacePath: "/tmp/workspace",
+      prompt: "cancel",
+      threadId: null,
+    });
+    const cancelPromise = runner.cancel("agent-cancel-error");
+    (fakeChild as unknown as EventEmitter).emit(
+      "error",
+      new Error("kill failed"),
+    );
+    (fakeChild as unknown as EventEmitter).emit("close", 1);
+
+    await expect(cancelPromise).resolves.toBe(true);
+    await expect(runPromise).rejects.toBeInstanceOf(RunCancelledError);
+  });
+
+  it("sanitizes child process errors with configured secrets", async () => {
+    const config = loadConfig({
+      NODE_ENV: "test",
+      CODEX_HOME: "/tmp/codex-home",
+      ARK_API_KEY: "bare-secret-value",
+    });
+    const runner = new CodexRunner(config);
+    const fakeChild = createFakeChild();
+    spawnMock.mockReturnValue(fakeChild);
+
+    const runPromise = runner.run({
+      agentId: "agent-spawn-error",
+      workspacePath: "/tmp/workspace",
+      prompt: "fail",
+      threadId: null,
+    });
+    (fakeChild as unknown as EventEmitter).emit(
+      "error",
+      new Error("Invalid API key provided: bare-secret-value"),
+    );
+    (fakeChild as unknown as EventEmitter).emit("close", 1);
+
+    const error = await runPromise.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("[REDACTED]");
+    expect((error as Error).message).not.toContain("bare-secret-value");
+  });
+
   it("redacts stderr before exposing a runner failure", async () => {
     const config = loadConfig({
       NODE_ENV: "test",
       CODEX_HOME: "/tmp/codex-home",
+      ARK_API_KEY: "must-not-leak",
     });
     const runner = new CodexRunner(config);
     const fakeChild = createFakeChild();
@@ -281,13 +432,13 @@ describe("Codex runner protocol", () => {
     });
     (fakeChild.stderr as unknown as EventEmitter).emit(
       "data",
-      Buffer.from("ARK_API_KEY=must-not-leak"),
+      Buffer.from("Invalid API key provided: must-not-leak"),
     );
     (fakeChild as unknown as EventEmitter).emit("close", 1);
 
     const error = await runPromise.catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain("ARK_API_KEY=[REDACTED]");
+    expect((error as Error).message).toContain("[REDACTED]");
     expect((error as Error).message).not.toContain("must-not-leak");
   });
 });

@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import { sanitizeMetadata, sanitizeText } from "./tracing/redaction.js";
+import { TraceNotFoundError } from "./tracing/trace-service.js";
 import type { Trace } from "./tracing/trace-types.js";
 import type { AgentService } from "./agent-service.js";
 
@@ -31,13 +32,19 @@ export interface TraceQueryService {
   getTrace(traceId: string): Trace;
   getTraceByRunId(runId: string): Trace | null;
 }
-function sanitizeTrace(trace: Trace): Trace {
+function sanitizeTrace(
+  trace: Trace,
+  sensitiveValues: readonly string[],
+): Trace {
   return {
     ...trace,
     spans: trace.spans.map((span) => ({
       ...span,
-      error: span.error === null ? null : sanitizeText(span.error),
-      metadata: sanitizeMetadata(span.metadata),
+      error:
+        span.error === null
+          ? null
+          : sanitizeText(span.error, sensitiveValues),
+      metadata: sanitizeMetadata(span.metadata, sensitiveValues),
     })),
   };
 }
@@ -62,11 +69,12 @@ export async function createApp(
   });
 
   app.addHook("onRequest", async (request, reply) => {
+    const requestPath = request.url.split("?", 1)[0];
     if (
       !config.authToken ||
-      !request.url.startsWith("/api/") ||
-      request.url === "/api/health" ||
-      request.url === "/api/auth"
+      !requestPath?.startsWith("/api/") ||
+      requestPath === "/api/health" ||
+      requestPath === "/api/auth"
     ) {
       return;
     }
@@ -146,22 +154,25 @@ export async function createApp(
     const { id } = runIdParams.parse(request.params);
     return { run: service.getRun(id) };
   });
-    app.get("/api/traces/:traceId", async (request) => {
+
+  app.get("/api/traces/:traceId", async (request) => {
     const { traceId } = traceIdParams.parse(request.params);
 
     try {
-      return { trace: sanitizeTrace(traceService.getTrace(traceId)) };
+      return {
+        trace: sanitizeTrace(traceService.getTrace(traceId), [
+          config.arkApiKey,
+          config.authToken,
+        ]),
+      };
     } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message === `Trace not found: ${traceId}`
-      ) {
+      if (error instanceof TraceNotFoundError) {
         throw new HttpError(404, "Trace not found");
       }
       throw error;
     }
   });
-    app.get("/api/runs/:runId/trace", async (request) => {
+  app.get("/api/runs/:runId/trace", async (request) => {
     const { runId } = runTraceParams.parse(request.params);
     const trace = traceService.getTraceByRunId(runId);
 
@@ -169,8 +180,11 @@ export async function createApp(
       throw new HttpError(404, "Trace not found");
     }
 
-    return { trace: sanitizeTrace(trace) };
+    return {
+      trace: sanitizeTrace(trace, [config.arkApiKey, config.authToken]),
+    };
   });
+
   if (config.nodeEnv === "production") {
     const webRoot = fileURLToPath(new URL("../../web/dist", import.meta.url));
     await app.register(fastifyStatic, {

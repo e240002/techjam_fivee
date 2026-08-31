@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { JsonStore } from "../store.js";
 import { REDACTED } from "./redaction.js";
-import { TraceService } from "./trace-service.js";
+import { TraceNotFoundError, TraceService } from "./trace-service.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -79,9 +79,7 @@ describe("TraceService retrieval contract", () => {
     const service = await makeTraceService();
     const missingId = randomUUID();
 
-    expect(() => service.getTrace(missingId)).toThrow(
-      `Trace not found: ${missingId}`,
-    );
+    expect(() => service.getTrace(missingId)).toThrow(TraceNotFoundError);
   });
 });
 
@@ -237,5 +235,72 @@ describe("TraceService persistence", () => {
       toolName: "new-tool",
     });
     expect(await readFile(databasePath, "utf8")).not.toContain("legacy-secret");
+  });
+
+  it("atomically finalizes every running span at the supplied completion time", async () => {
+    const service = await makeTraceService();
+    const trace = await service.startTrace({
+      agentId: "agent-finalize",
+      runId: "run-finalize",
+    });
+    const parent = await service.startSpan({
+      traceId: trace.id,
+      type: "orchestration",
+      name: "agent run",
+    });
+    await service.startSpan({
+      traceId: trace.id,
+      parentSpanId: parent.id,
+      type: "model",
+      name: "model request",
+    });
+
+    const completedAt = new Date(Date.now() + 1_000).toISOString();
+    const finalized = await service.finalizeTrace(trace.id, {
+      status: "failed",
+      error: "token=trace-secret request failed",
+      completedAt,
+    });
+
+    expect(finalized).toMatchObject({
+      status: "failed",
+      completedAt,
+    });
+    expect(finalized.spans).toHaveLength(2);
+    for (const span of finalized.spans) {
+      expect(span.status).toBe("failed");
+      expect(span.completedAt).toBe(completedAt);
+      expect(span.durationMs).toBeGreaterThanOrEqual(0);
+      expect(span.error).toBe(`token=${REDACTED} request failed`);
+    }
+  });
+
+  it("re-scrubs a legacy span error when ending without a replacement", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-trace-test-"));
+    temporaryDirectories.push(root);
+    const databasePath = path.join(root, "db.json");
+    const store = new JsonStore(databasePath);
+    await store.initialize();
+    const service = new TraceService(store, ["bare-configured-secret"]);
+    const trace = await service.startTrace({
+      agentId: "agent-legacy-error",
+      runId: "run-legacy-error",
+    });
+    const span = await service.startSpan({
+      traceId: trace.id,
+      type: "model",
+      name: "legacy model",
+    });
+
+    await store.mutate((database) => {
+      database.traces[0]!.spans[0]!.error =
+        "provider rejected bare-configured-secret";
+    });
+    const ended = await service.endSpan(span.id, { status: "failed" });
+
+    expect(ended.error).toBe(`provider rejected ${REDACTED}`);
+    expect(await readFile(databasePath, "utf8")).not.toContain(
+      "bare-configured-secret",
+    );
   });
 });

@@ -3,6 +3,7 @@ import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
 import { JsonStore } from "./store.js";
+import { sanitizeMetadata, sanitizeText } from "./tracing/redaction.js";
 import { TraceService } from "./tracing/trace-service.js";
 import type {
   Agent,
@@ -10,6 +11,8 @@ import type {
   AgentRunner,
   CreateAgentInput,
   Message,
+  RunnerEvent,
+  RunUsage,
   UpdateAgentInput,
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
@@ -23,9 +26,19 @@ interface RunTraceState {
   orchestrationSpanId: string | null;
 }
 
+interface RunnerEventState {
+  threadId: string | null;
+  usage: RunUsage | null;
+  itemCounts: Map<string, number>;
+  errorCount: number;
+}
+
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
-  private readonly cancellationRequests = new Set<string>();
+  private readonly cancellationRequests = new Map<string, number>();
+  private readonly lifecycleBlocks = new Set<string>();
+  private readonly sensitiveValues: readonly string[];
+  private shuttingDown = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -33,23 +46,60 @@ export class AgentService {
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
     private readonly traces: TraceService,
-  ) {}
+  ) {
+    this.sensitiveValues = [config.arkApiKey, config.authToken].filter(
+      (value) => value.length > 0,
+    );
+  }
 
   async initialize(): Promise<void> {
     await this.store.initialize();
     await this.workspaces.initialize();
     await this.store.mutate((database) => {
+      const recoveredAt = now();
       for (const run of database.runs) {
         if (run.status === "queued" || run.status === "running") {
           run.status = "cancelled";
           run.error = "Server restarted while this run was active";
-          run.completedAt = now();
+          run.completedAt = recoveredAt;
         }
       }
       for (const agent of database.agents) {
         if (agent.status === "busy") {
           agent.status = "ready";
-          agent.updatedAt = now();
+          agent.updatedAt = recoveredAt;
+        }
+      }
+      for (const trace of database.traces) {
+        const run = database.runs.find((candidate) => candidate.id === trace.runId);
+        const recoveredStatus =
+          trace.status === "running"
+            ? run?.status === "completed" || run?.status === "failed"
+              ? run.status
+              : "cancelled"
+            : trace.status;
+        const completedAt = trace.completedAt ?? recoveredAt;
+
+        if (trace.status === "running") {
+          trace.status = recoveredStatus;
+          trace.completedAt = completedAt;
+        }
+
+        for (const span of trace.spans) {
+          if (span.status !== "running") continue;
+          span.status = recoveredStatus;
+          span.completedAt = completedAt;
+          const startedAtMs = Date.parse(span.startedAt);
+          const completedAtMs = Date.parse(completedAt);
+          span.durationMs =
+            Number.isFinite(startedAtMs) && Number.isFinite(completedAtMs)
+              ? Math.max(0, completedAtMs - startedAtMs)
+              : null;
+          if (recoveredStatus === "cancelled") {
+            span.error ??= "Run cancelled after server restart";
+          } else if (recoveredStatus === "failed") {
+            span.error ??= "Execution failed";
+          }
         }
       }
     });
@@ -438,7 +488,10 @@ export class AgentService {
   }
 
   private async cancelExecution(agentId: string): Promise<void> {
-    this.cancellationRequests.add(agentId);
+    this.cancellationRequests.set(
+      agentId,
+      (this.cancellationRequests.get(agentId) ?? 0) + 1,
+    );
 
     try {
       await this.runner.cancel(agentId);
@@ -449,7 +502,12 @@ export class AgentService {
         await execution;
       }
     } finally {
-      this.cancellationRequests.delete(agentId);
+      const remaining = (this.cancellationRequests.get(agentId) ?? 1) - 1;
+      if (remaining > 0) {
+        this.cancellationRequests.set(agentId, remaining);
+      } else {
+        this.cancellationRequests.delete(agentId);
+      }
     }
   }
 }

@@ -11,7 +11,10 @@ const config = loadConfig();
 await writeCodexConfig(config);
 
 const store = new JsonStore(path.join(config.dataDirectory, "launchpad.json"));
-const traceService = new TraceService(store);
+const traceService = new TraceService(store, [
+  config.arkApiKey,
+  config.authToken,
+]);
 const workspaces = new WorkspaceManager(config.workspaceRoot);
 const runner = createRunner(config);
 const service = new AgentService(config, store, workspaces, runner, traceService);
@@ -22,12 +25,21 @@ const app = await createApp(config, service, traceService);
 let shutdownStarted = false;
 
 const shutdown = async (signal: string) => {
-  if (shutdownStarted) return;
+  if (shutdownStarted) {
+    app.log.error({ signal }, "Forcing shutdown after a second signal");
+    process.exit(1);
+  }
   shutdownStarted = true;
   app.log.info({ signal }, "Shutting down");
-  await app.close();
-  await service.shutdown();
-  process.exit(0);
+
+  try {
+    await app.close();
+    await service.shutdown();
+    process.exit(0);
+  } catch (error) {
+    app.log.error(error, "Graceful shutdown failed");
+    process.exit(1);
+  }
 };
 
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
