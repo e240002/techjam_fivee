@@ -91,6 +91,30 @@ describe("JsonStore", () => {
     expect(reloaded.snapshot().messages[0]?.content).toBe("persisted content");
   });
 
+  it("returns a detached clone of only the selected records", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-test-"));
+    temporaryDirectories.push(root);
+    const databasePath = path.join(root, "db.json");
+    const store = new JsonStore(databasePath);
+    await store.initialize();
+
+    await store.mutate((database) => {
+      database.messages.push({
+        id: "message-1",
+        agentId: "agent-1",
+        runId: "run-1",
+        role: "assistant",
+        content: "selected content",
+        createdAt: new Date().toISOString(),
+      });
+    });
+
+    const selected = store.select((database) => database.messages);
+    selected[0]!.content = "mutated selected clone";
+
+    expect(store.snapshot().messages[0]?.content).toBe("selected content");
+  });
+
   it("returns and retains the exact durable JSON representation", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-test-"));
     temporaryDirectories.push(root);
