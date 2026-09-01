@@ -1,11 +1,15 @@
-# Volc Agent Launchpad
+# RunProof
 
-A minimal Agent platform for three-day middleware hackathons. It provides Agent
+**Every Agent run leaves a receipt.**
+
+RunProof is privacy-safe observability middleware for AI Agents. It turns every
+real Agent Run into persistent, correlated evidence for debugging, audit, and
+recovery without storing prompts or outputs.
+
+RunProof is built on Volc Agent Launchpad, a minimal Agent platform with Agent
 CRUD, a browser Playground, persistent workspaces, and Codex CLI backed by the
-Volcengine Ark Responses API.
-
-Run it locally with Docker, Colima, or rootless Podman, or deploy it to
-Volcengine ECS.
+Volcengine Ark Responses API. Run it locally with Docker, Colima, or rootless
+Podman, or deploy it to Volcengine ECS.
 
 > [!WARNING]
 > This is a single-user proof of concept with trace and audit middleware. It
@@ -26,6 +30,10 @@ Volcengine ECS.
 
 ![Trace Details panel showing selectable completed, cancelled, and failed Runs with correlated spans](docs/assets/trace-evidence.jpg)
 
+### RunProof architecture
+
+![RunProof architecture, data flow, trust boundaries, and middleware integration](docs/assets/runproof-architecture.png)
+
 ## Features
 
 - React and TypeScript Web UI
@@ -36,7 +44,7 @@ Volcengine ECS.
 - Docker and Terraform deployment paths for Volcengine ECS
 - Persistent, correlated Run traces with safe model usage and event metadata
 
-## Middleware: Trace, Audit, and Observability
+## RunProof middleware: Trace, Audit, and Observability
 
 This submission adds a backend observability path without changing how Agents
 execute. Every real Agent Run creates a persisted trace with an orchestration
@@ -70,7 +78,8 @@ GET /api/traces/:traceId for reproducible inspection.
 
 - [Three-minute demo script](docs/DEMO_SCRIPT.md)
 - [Submission write-up](docs/SUBMISSION.md)
-- [One-page architecture](docs/ARCHITECTURE.md)
+- [One-page RunProof architecture diagram](docs/assets/runproof-architecture.png)
+- [Architecture details](docs/ARCHITECTURE.md)
 
 ## Requirements
 
@@ -100,7 +109,7 @@ Runtime image.
 ### 2. Clone the repository
 
 ```bash
-git clone <repository-url> volc-agent-launchpad
+git clone https://github.com/e240002/techjam_fivee.git volc-agent-launchpad
 cd volc-agent-launchpad
 ```
 
@@ -111,6 +120,7 @@ Skip this step when already working from the repository root.
 ```bash
 ARK_API_KEY=your-ark-api-key \
 ARK_MODEL=ep-your-endpoint-id \
+ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 \
 npm run poc
 ```
 
@@ -159,6 +169,7 @@ Force Podman when multiple engines are installed:
 CONTAINER_ENGINE=podman \
 ARK_API_KEY=your-ark-api-key \
 ARK_MODEL=ep-your-endpoint-id \
+ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 \
 npm run poc
 ```
 
@@ -180,6 +191,7 @@ Required values in `.env`:
 ```dotenv
 ARK_API_KEY=your-ark-api-key
 ARK_MODEL=ep-your-endpoint-id
+ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3
 APP_AUTH_TOKEN=replace-with-at-least-24-random-characters
 ```
 
@@ -242,7 +254,7 @@ cp deploy/volcengine/terraform.tfvars.example \
 | --- | --- | --- |
 | `ARK_API_KEY` | Required | Ark model API key. |
 | `ARK_MODEL` | Required | Responses-capable endpoint or model ID. |
-| `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
+| `ARK_BASE_URL` | BytePlus AP-Southeast v3 endpoint | Ark OpenAI-compatible API URL. |
 | `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |

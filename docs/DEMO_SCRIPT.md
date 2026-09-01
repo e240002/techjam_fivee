@@ -23,18 +23,18 @@ Create a small TypeScript CLI with tests. Work step by step and run the tests.
 
 ## Recording
 
-### 0:00-0:20  Problem and result
+### 0:00-0:20 - Problem and result
 
 **Screen:** Repository README, then the Agent Playground.
 
 **Say:**
 
 > AI Agents are difficult to trust when a Run is only visible as a final answer
-> or an error. We built lightweight Trace, Audit, and Observability middleware
-> for Volc Agent Launchpad. Every real Run now leaves correlated, persistent,
-> and sanitized execution evidence.
+> or an error. We built RunProof, lightweight Trace, Audit, and Observability
+> middleware for Volc Agent Launchpad. Every real Run now leaves correlated,
+> persistent, and sanitized execution evidence.
 
-### 0:20-0:45  Architecture
+### 0:20-0:45 - Architecture
 
 **Screen:** docs/ARCHITECTURE.md, with the Mermaid diagram visible.
 
@@ -46,7 +46,7 @@ Create a small TypeScript CLI with tests. Work step by step and run the tests.
 > store. The UI retrieves evidence by Run ID, while the Ark API key remains
 > server-side.
 
-### 0:45-1:25  Real successful Run
+### 0:45-1:25 - Real successful Run
 
 **Screen:** Playground with the Agent ready.
 
@@ -61,7 +61,7 @@ Create a small TypeScript CLI with tests. Work step by step and run the tests.
 > its codex.run child span, safe event counts, model usage, and a correlated
 > trace ID. The evidence survives page refreshes and service restarts.
 
-### 1:25-2:05  Cancellation and control
+### 1:25-2:05 - Cancellation and control
 
 **Screen:** Trace panel and Recent Runs.
 
@@ -77,7 +77,7 @@ Create a small TypeScript CLI with tests. Work step by step and run the tests.
 > operator compare completed, cancelled, and failed outcomes without leaving the
 > Playground.
 
-### 2:05-2:35  Robustness and privacy
+### 2:05-2:35 - Robustness and privacy
 
 **Screen:** Trace panel metadata, then the tracing section of the README.
 
@@ -88,6 +88,14 @@ Create a small TypeScript CLI with tests. Work step by step and run the tests.
 > and sanitized again before API responses. We deliberately do not record
 > prompts, outputs, thread IDs, environment variables, or credentials.
 
-### 2:35-3:00  Reproducibility and close
+### 2:35-3:00 - Reproducibility and close
 
 **Screen:** README local setup and test result.
+
+**Say:**
+
+> A reviewer can clone the repository, set three Ark variables, and start the
+> complete platform with one command. The current branch passes type checking,
+> 95 automated tests, and both production builds. RunProof gives every Agent Run
+> a durable, privacy-safe receipt: what happened, how it ended, and what it
+> consumed, without exposing sensitive content.

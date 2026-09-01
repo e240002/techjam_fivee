@@ -1,12 +1,12 @@
-# TechJam submission
+# RunProof - TechJam submission
 
 ## Submission fields
 
-- **Project:** Volc Agent Launchpad  Trace, Audit, and Observability Middleware
-- **Track:** Agent Launchpad  Design and Build Lightweight Agent Middleware
+- **Project:** RunProof - Privacy-Safe Observability Middleware for AI Agents
+- **Track:** Agent Launchpad - Design and Build Lightweight Agent Middleware
 - **Repository:** https://github.com/e240002/techjam_fivee
-- **Demo video:** TODO: add the final public or judge-accessible video URL
-- **Team:** TODO: add the official team name and member names
+- **Demo:** Three-minute live walkthrough of the local POC during judging
+- **Team:** Team Fivee
 
 ## One-line summary
 
@@ -23,7 +23,7 @@ credentials, and environment data may be sensitive.
 
 ## Solution
 
-We added a lightweight observability path to Volc Agent Launchpad without
+RunProof adds a lightweight observability path to Volc Agent Launchpad without
 changing its execution contract. Every real Agent Run creates:
 
 - an agent.run orchestration span;
@@ -56,6 +56,7 @@ through the same service, keeping the feature independent of the runtime
 provider.
 
 Full architecture: [ARCHITECTURE.md](ARCHITECTURE.md)
+One-page diagram: [runproof-architecture.png](assets/runproof-architecture.png)
 
 ## End-to-end behavior
 

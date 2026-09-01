@@ -332,8 +332,8 @@ export default function App() {
     return (
       <main className="auth-screen">
         <section className="auth-card" aria-live="polite">
-          <div className="brand-mark">A</div>
-          <span className="eyebrow">Agent Launchpad</span>
+          <div className="brand-mark">R</div>
+          <span className="eyebrow">RunProof</span>
           <h1>Connecting to the control plane</h1>
           {error ? <div className="error-banner" role="alert">{error}</div> : <Spinner />}
         </section>
@@ -345,8 +345,8 @@ export default function App() {
     return (
       <main className="auth-screen">
         <form className="auth-card" onSubmit={unlock}>
-          <div className="brand-mark">A</div>
-          <span className="eyebrow">Agent Launchpad</span>
+          <div className="brand-mark">R</div>
+          <span className="eyebrow">RunProof</span>
           <h1>Enter the access token</h1>
           <p>This shared demo token is configured by the platform operator.</p>
           {error && <div className="error-banner" role="alert">{error}</div>}
@@ -362,7 +362,7 @@ export default function App() {
             />
           </label>
           <button className="button button-primary" disabled={busy || !authInput.trim()}>
-            {busy ? <Spinner /> : "Open Launchpad"}
+            {busy ? <Spinner /> : "Open RunProof"}
           </button>
         </form>
       </main>
@@ -373,9 +373,9 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">A</div>
+          <div className="brand-mark">R</div>
           <div>
-            <strong>Agent Launchpad</strong>
+            <strong>RunProof</strong>
             <span>
               {system?.runtimeProvider === "container"
                 ? "Local container · Codex CLI"
@@ -768,8 +768,8 @@ export default function App() {
           </>
         ) : (
           <div className="no-agent">
-            <div className="no-agent-art">A</div>
-            <span className="eyebrow">Agent Launchpad</span>
+            <div className="no-agent-art">R</div>
+            <span className="eyebrow">RunProof</span>
             <h1>Your runtime is ready for an Agent.</h1>
             <p>Create a workspace, give Codex a job, and continue the conversation here.</p>
             <button

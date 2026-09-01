@@ -1,6 +1,13 @@
-# Architecture
+# RunProof architecture
 
-Volc Agent Launchpad is a single-node control plane for hackathon use.
+RunProof is privacy-safe observability middleware integrated into Volc Agent
+Launchpad, a single-node control plane for hackathon use.
+
+## One-page architecture diagram
+
+![RunProof architecture, data flow, trust boundaries, and middleware integration](assets/runproof-architecture.png)
+
+## Reference flow
 
 ```mermaid
 flowchart LR
