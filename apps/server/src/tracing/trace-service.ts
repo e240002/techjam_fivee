@@ -177,9 +177,9 @@ export class TraceService {
    * Get a trace by trace ID.
    */
   getTrace(traceId: string): Trace {
-    const trace = this.store
-      .snapshot()
-      .traces.find((candidate) => candidate.id === traceId);
+    const trace = this.store.select((database) =>
+      database.traces.find((candidate) => candidate.id === traceId),
+    );
 
     if (!trace) {
       throw new TraceNotFoundError(traceId);
@@ -192,10 +192,9 @@ export class TraceService {
    * Get a trace by Run ID.
    */
   getTraceByRunId(runId: string): Trace | null {
-    return (
-      this.store
-        .snapshot()
-        .traces.find((trace) => trace.runId === runId) ?? null
+    return this.store.select(
+      (database) =>
+        database.traces.find((trace) => trace.runId === runId) ?? null,
     );
   }
 
@@ -203,7 +202,7 @@ export class TraceService {
    * Get all traces.
    */
   getTraces(): Trace[] {
-    return this.store.snapshot().traces;
+    return this.store.select((database) => database.traces);
   }
 
   private findTrace(database: Database, traceId: string): Trace {
