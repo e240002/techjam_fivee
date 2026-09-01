@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
+import { formatRuntimeError } from "./runtime-errors.js";
 import { JsonStore } from "./store.js";
 import { sanitizeMetadata, sanitizeText } from "./tracing/redaction.js";
 import { TraceService } from "./tracing/trace-service.js";
@@ -195,12 +196,14 @@ export class AgentService {
 
   listAgents(): Agent[] {
     return this.store
-      .snapshot()
-      .agents.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      .select((database) => database.agents)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   getAgent(id: string): Agent {
-    const agent = this.store.snapshot().agents.find((item) => item.id === id);
+    const agent = this.store.select((database) =>
+      database.agents.find((item) => item.id === id),
+    );
     if (!agent) {
       throw new HttpError(404, "Agent not found");
     }
@@ -292,13 +295,16 @@ export class AgentService {
   getMessages(agentId: string): Message[] {
     this.getAgent(agentId);
     return this.store
-      .snapshot()
-      .messages.filter((message) => message.agentId === agentId)
+      .select((database) =>
+        database.messages.filter((message) => message.agentId === agentId),
+      )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
   getRun(runId: string): AgentRun {
-    const run = this.store.snapshot().runs.find((item) => item.id === runId);
+    const run = this.store.select((database) =>
+      database.runs.find((item) => item.id === runId),
+    );
     if (!run) {
       throw new HttpError(404, "Run not found");
     }
@@ -308,8 +314,9 @@ export class AgentService {
   getRuns(agentId: string): AgentRun[] {
     this.getAgent(agentId);
     return this.store
-      .snapshot()
-      .runs.filter((run) => run.agentId === agentId)
+      .select((database) =>
+        database.runs.filter((run) => run.agentId === agentId),
+      )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
@@ -390,6 +397,8 @@ export class AgentService {
       arkConfigured: isArkConfigured(this.config),
       arkBaseUrl: this.config.arkBaseUrl,
       arkModel: this.config.arkModel || null,
+      codexReasoningEffort: this.config.codexReasoningEffort ?? null,
+      codexModelVerbosity: this.config.codexModelVerbosity ?? null,
       codexAvailable: await this.runner.isAvailable(),
       codexSandboxMode: this.config.codexSandboxMode,
       runtimeProvider: this.config.runtimeProvider,
@@ -715,9 +724,10 @@ export class AgentService {
   }
 
   private sanitizeError(error: unknown): string {
-    return this.sanitizeErrorText(
-      error instanceof Error ? error.message : String(error),
-    );
+    return formatRuntimeError(error, {
+      arkModel: this.config.arkModel,
+      sensitiveValues: this.sensitiveValues,
+    });
   }
 
   private sanitizeErrorText(message: string): string {
@@ -765,10 +775,11 @@ export class AgentService {
     });
 
     const runIdSet = new Set(runIds);
-    const traceIds = this.store
-      .snapshot()
-      .traces.filter((trace) => runIdSet.has(trace.runId))
-      .map((trace) => trace.id);
+    const traceIds = this.store.select((database) =>
+      database.traces
+        .filter((trace) => runIdSet.has(trace.runId))
+        .map((trace) => trace.id),
+    );
     await Promise.allSettled(
       traceIds.map((traceId) =>
         this.traces.finalizeTrace(traceId, {
