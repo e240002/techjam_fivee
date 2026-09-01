@@ -69,6 +69,46 @@ export async function createApp(
         : false,
   });
 
+  app.setErrorHandler((error, request, reply) => {
+    const appError = error instanceof Error ? error : new Error(String(error));
+    const validationError = error instanceof z.ZodError;
+    const frameworkStatus =
+      typeof (error as { statusCode?: unknown }).statusCode === "number"
+        ? (error as { statusCode: number }).statusCode
+        : null;
+    const statusCode =
+      error instanceof HttpError
+        ? error.statusCode
+        : validationError
+          ? 400
+          : frameworkStatus && frameworkStatus >= 400 && frameworkStatus <= 599
+            ? frameworkStatus
+            : 500;
+    const sanitizedMessage = sanitizeText(appError.message, sensitiveValues);
+    if (statusCode >= 500) {
+      request.log.error(
+        {
+          errorName: appError.name,
+          errorMessage: sanitizedMessage,
+        },
+        "Request failed",
+      );
+    }
+    const exposeMessage =
+      error instanceof HttpError || validationError || statusCode < 500;
+    return reply.code(statusCode).send({
+      error: exposeMessage ? sanitizedMessage : "Internal server error",
+      ...(validationError
+        ? {
+            details: sanitizeMetadata(
+              { details: error.issues },
+              sensitiveValues,
+            ).details,
+          }
+        : {}),
+    });
+  });
+
   app.addHook("onRequest", async (request, reply) => {
     const requestPath = request.url.split("?", 1)[0];
     if (
@@ -196,44 +236,6 @@ export async function createApp(
       return reply.sendFile("index.html");
     });
   }
-
-  app.setErrorHandler((error, request, reply) => {
-    const appError = error instanceof Error ? error : new Error(String(error));
-    const validationError = error instanceof z.ZodError;
-    const frameworkStatus =
-      typeof (error as { statusCode?: unknown }).statusCode === "number"
-        ? (error as { statusCode: number }).statusCode
-        : null;
-    const statusCode =
-      error instanceof HttpError
-        ? error.statusCode
-        : validationError
-          ? 400
-          : frameworkStatus && frameworkStatus >= 400 && frameworkStatus <= 599
-            ? frameworkStatus
-            : 500;
-    const sanitizedMessage = sanitizeText(appError.message, sensitiveValues);
-    if (statusCode >= 500) {
-      request.log.error(
-        {
-          errorName: appError.name,
-          errorMessage: sanitizedMessage,
-        },
-        "Request failed",
-      );
-    }
-    return reply.code(statusCode).send({
-      error: statusCode >= 500 ? "Internal server error" : sanitizedMessage,
-      ...(validationError
-        ? {
-            details: sanitizeMetadata(
-              { details: error.issues },
-              sensitiveValues,
-            ).details,
-          }
-        : {}),
-    });
-  });
 
   return app;
 }
