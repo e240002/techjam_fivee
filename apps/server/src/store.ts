@@ -15,6 +15,22 @@ interface SerializedDatabase {
   contents: string;
 }
 
+type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer Item)[]
+    ? readonly DeepReadonly<Item>[]
+    : T extends object
+      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+      : T;
+
+type DeepMutable<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer Item)[]
+    ? DeepMutable<Item>[]
+    : T extends object
+      ? { -readonly [Key in keyof T]: DeepMutable<T[Key]> }
+      : T;
+
 function serializeDatabase(data: Database): SerializedDatabase {
   const json = JSON.stringify(data, null, 2);
   if (json === undefined) {
@@ -65,6 +81,18 @@ export class JsonStore {
 
   snapshot(): Database {
     return structuredClone(this.data);
+  }
+
+  /**
+   * Return a detached clone of only the selected records. This keeps frequent
+   * read paths from cloning the entire database while preserving snapshot
+   * isolation for callers.
+   */
+  select<T>(
+    selector: (database: DeepReadonly<Database>) => T,
+  ): DeepMutable<T> {
+    const selected = selector(this.data as DeepReadonly<Database>);
+    return structuredClone(selected) as DeepMutable<T>;
   }
 
   async mutate<T>(mutation: (database: Database) => T | Promise<T>): Promise<T> {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createApp, type TraceQueryService } from "./app.js";
 import type { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
+import { HttpError } from "./errors.js";
 import type { Trace } from "./tracing/trace-types.js";
 import { TraceNotFoundError } from "./tracing/trace-service.js";
 
@@ -166,6 +167,30 @@ describe("HTTP boundary", () => {
     expect(response.statusCode).toBe(500);
     expect(response.json()).toEqual({ error: "Internal server error" });
     expect(response.body).not.toContain(configuredSecret);
+    await app.close();
+  });
+
+  it("preserves intentional operator guidance on service errors", async () => {
+    const guidance = "Ark is not configured. Set ARK_API_KEY and ARK_MODEL, then restart.";
+    const unavailableService = {
+      ...service,
+      listAgents: () => {
+        throw new HttpError(503, guidance);
+      },
+    } as unknown as AgentService;
+    const app = await createApp(
+      loadConfig({ NODE_ENV: "test" }),
+      unavailableService,
+      traceService,
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agents",
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ error: guidance });
     await app.close();
   });
 

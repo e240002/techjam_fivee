@@ -258,6 +258,8 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
+| `CODEX_REASONING_EFFORT` | Provider default | Optional `minimal`, `low`, `medium`, `high`, or `xhigh` Responses API effort. Use only when supported by the activated endpoint. |
+| `CODEX_MODEL_VERBOSITY` | Provider default | Optional `low`, `medium`, or `high` response verbosity. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
 
