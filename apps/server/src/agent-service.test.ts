@@ -520,10 +520,12 @@ describe("Agent run integration failures", () => {
     await expect.poll(() => service.getRun(run.id).status).toBe("failed");
 
     expect(service.getRun(run.id).error).toBe(
-      "Invalid API key provided: [REDACTED]",
+      "Ark rejected the credentials. Verify ARK_API_KEY and confirm that it can " +
+        "access the configured ARK_MODEL, then restart Launchpad.",
     );
     expect(service.getAgent(agent.id).lastError).toBe(
-      "Invalid API key provided: [REDACTED]",
+      "Ark rejected the credentials. Verify ARK_API_KEY and confirm that it can " +
+        "access the configured ARK_MODEL, then restart Launchpad.",
     );
     expect(JSON.stringify(store.snapshot())).not.toContain("test-key");
   });
